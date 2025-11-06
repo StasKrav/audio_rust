@@ -60,13 +60,44 @@ struct App {
 
 impl App {
     fn new(start_dir: Option<String>) -> Result<Self, Box<dyn std::error::Error>> {
-        let current_dir = start_dir
-            .map(PathBuf::from)
-            .filter(|p| p.is_dir())
-            .unwrap_or_else(|| PathBuf::from("."));
+        let (current_dir, initial_file) = if let Some(dir) = start_dir {
+            let path = PathBuf::from(&dir);
+            
+            // Пробуем найти файл/папку относительно текущей директории
+            let absolute_path = if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()?.join(path)
+            };
+    
+            if absolute_path.exists() {
+                if absolute_path.is_dir() {
+                    (absolute_path, None)
+                } else if absolute_path.is_file() {
+                    // Если передан файл - берем его директорию и запоминаем файл
+                    let parent = absolute_path.parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    (parent, Some(absolute_path))
+                } else {
+                    return Err("Указанный путь не является файлом или папкой".into());
+                }
+            } else {
+                return Err(format!("Путь не существует: {}", absolute_path.display()).into());
+            }
+        } else {
+            // По умолчанию - домашняя директория
+            let home_dir = std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/"));
+            (home_dir, None)
+        };
+    
+        // Канонизируем путь (убираем ../ и ./)
+        let current_dir = current_dir.canonicalize().unwrap_or(current_dir);
         
         let mut app = App {
-            current_dir: current_dir.clone(),
+            current_dir,
             files: Vec::new(),
             playlist: Vec::new(),
             files_list_state: ListState::default(),
@@ -79,6 +110,21 @@ impl App {
         };
         
         app.load_directory()?;
+        
+        // Если был передан файл - добавляем его в плейлист и начинаем воспроизведение
+        if let Some(file_path) = initial_file {
+            if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
+                app.playlist.push(PlaylistEntry {
+                    path: file_path.clone(),
+                    name: file_name.to_string(),
+                    playing: false,
+                });
+                
+                // Начинаем воспроизведение
+                app.play()?;
+            }
+        }
+        
         Ok(app)
     }
 
@@ -86,7 +132,7 @@ impl App {
         self.files.clear();
         
         // Добавляем родительскую папку (кроме корневой)
-        if self.current_dir != PathBuf::from(".") && self.current_dir.parent().is_some() {
+        if self.current_dir.parent().is_some() {
             self.files.push(FileEntry {
                 path: self.current_dir.parent().unwrap().to_path_buf(),
                 is_dir: true,
@@ -94,12 +140,12 @@ impl App {
                 selected: false,
             });
         }
-
+    
         // Читаем содержимое папки
         let entries = fs::read_dir(&self.current_dir)?;
         let mut dirs = Vec::new();
         let mut audio_files = Vec::new();
-
+    
         for entry in entries {
             if let Ok(entry) = entry {
                 let path = entry.path();
@@ -128,19 +174,19 @@ impl App {
                 }
             }
         }
-
+    
         // Сортируем: сначала папки, потом файлы
         dirs.sort_by(|a, b| a.name.cmp(&b.name));
         audio_files.sort_by(|a, b| a.name.cmp(&b.name));
         
         self.files.extend(dirs);
         self.files.extend(audio_files);
-
+    
         // Выбираем первый элемент
         if !self.files.is_empty() {
             self.files_list_state.select(Some(0));
         }
-
+    
         Ok(())
     }
 
@@ -204,11 +250,9 @@ impl App {
 
     fn leave_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.active_panel == 0 {
-            if self.current_dir != PathBuf::from(".") {
-                if let Some(parent) = self.current_dir.parent() {
-                    self.current_dir = parent.to_path_buf();
-                    self.load_directory()?;
-                }
+            if let Some(parent) = self.current_dir.parent() {
+                self.current_dir = parent.to_path_buf();
+                self.load_directory()?;
             }
         }
         Ok(())
@@ -531,7 +575,7 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, entry)| {
-            let icon = if entry.is_dir { "📁 " } else { "○ " };
+            let icon = if entry.is_dir { " " } else { " " };
             let selection_indicator = if entry.selected { "█ " } else { "  " };
             
             let style = if app.active_panel == 0 && Some(i) == app.files_list_state.selected() {
