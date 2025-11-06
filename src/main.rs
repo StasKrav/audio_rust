@@ -149,6 +149,14 @@ impl App {
         for entry in entries {
             if let Ok(entry) = entry {
                 let path = entry.path();
+                
+                // Пропускаем скрытые файлы/папки (начинающиеся с .)
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with('.') {
+                        continue;
+                    }
+                }
+                
                 let is_dir = path.is_dir();
                 
                 if is_dir {
@@ -354,29 +362,42 @@ impl App {
         if let Some(sink) = &self.sink {
             sink.stop();
         }
-    
-        // Определяем что воспроизводить
-        let files_to_play = if self.has_selected_files() {
-            // Воспроизводим выделенные файлы
-            self.get_selected_files()
-        } else if self.active_panel == 0 {
-            // Воспроизводим текущий файл из файлового менеджера
-            if let Some(selected) = self.files_list_state.selected() {
-                if let Some(entry) = self.files.get(selected) {
-                    if !entry.is_dir {
-                        vec![entry.path.clone()]
+    // Сбрасываем индекс на начало
+        self.current_playlist_index = 0;
+        // Определяем что воспроизводить в зависимости от активной панели
+        let files_to_play = match self.active_panel {
+            0 => {
+                // Левая панель - файловый менеджер
+                if self.has_selected_files() {
+                    // Воспроизводим выделенные файлы
+                    self.get_selected_files()
+                } else {
+                    // Воспроизводим текущий файл под курсором
+                    if let Some(selected) = self.files_list_state.selected() {
+                        if let Some(entry) = self.files.get(selected) {
+                            if !entry.is_dir {
+                                vec![entry.path.clone()]
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            vec![]
+                        }
                     } else {
                         vec![]
                     }
-                } else {
-                    vec![]
                 }
-            } else {
-                vec![]
             }
-        } else {
-            // Воспроизводим плейлист
-            self.playlist.iter().map(|entry| entry.path.clone()).collect()
+            1 => {
+                // Правая панель - плейлист
+                if self.playlist.is_empty() {
+                    vec![]
+                } else {
+                    // Воспроизводим весь плейлист
+                    self.playlist.iter().map(|entry| entry.path.clone()).collect()
+                }
+            }
+            _ => vec![],
         };
     
         if files_to_play.is_empty() {
@@ -389,7 +410,7 @@ impl App {
         
         // Загружаем и воспроизводим первый файл
         if let Some(first_file) = files_to_play.first() {
-            println!("🎵 Воспроизведение: {}", first_file.display()); // Отладочная информация
+            // println!("🎵 Воспроизведение: {}", first_file.display());
             
             let file = File::open(first_file)?;
             let source = Decoder::new(BufReader::new(file))?;
@@ -405,25 +426,43 @@ impl App {
             // Помечаем текущий трек как играющий
             self.update_playing_status();
         }
+         self.current_playlist_index = 0; // Начинаем с первого трека
     
         Ok(())
     }
-
+    fn next_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.is_playing {
+            self.play_next()?;
+        }
+        Ok(())
+    }
+    
+    fn previous_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.current_playlist_index > 0 {
+            self.current_playlist_index -= 1;
+            // Воспроизводим предыдущий трек
+            if let Some(sink) = &self.sink {
+                sink.stop();
+            }
+            self.play()?; // Перезапускаем воспроизведение с нового индекса
+        }
+        Ok(())
+    }
     fn toggle_playback(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("🔊 Нажата кнопка Space"); // Отладочная информация
+//         println!("🔊 Нажата кнопка Space (активная панель: {})", self.active_panel);
         
         if let Some(sink) = &self.sink {
             if sink.is_paused() {
-                println!("▶️ Продолжаем воспроизведение");
+                // println!("▶️ Продолжаем воспроизведение");
                 sink.play();
                 self.is_playing = true;
             } else {
-                println!("⏸️ Ставим на паузу");
+                // println!("⏸️ Ставим на паузу");
                 sink.pause();
                 self.is_playing = false;
             }
         } else {
-            println!("🎵 Начинаем новое воспроизведение");
+            // println!("🎵 Начинаем новое воспроизведение");
             self.play()?;
         }
         
@@ -457,12 +496,77 @@ impl App {
         }
     }
 
+    fn play_next(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(sink) = &self.sink {
+            sink.stop();
+        }
+    
+        self.current_playlist_index += 1;
+        
+        // Определяем список файлов для воспроизведения
+        let files_to_play = match self.active_panel {
+            0 => {
+                if self.has_selected_files() {
+                    self.get_selected_files()
+                } else if let Some(selected) = self.files_list_state.selected() {
+                    if let Some(entry) = self.files.get(selected) {
+                        if !entry.is_dir {
+                            vec![entry.path.clone()]
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            }
+            1 => {
+                self.playlist.iter().map(|entry| entry.path.clone()).collect()
+            }
+            _ => vec![],
+        };
+    
+        // Проверяем есть ли еще треки
+        if self.current_playlist_index >= files_to_play.len() {
+            self.is_playing = false;
+            self.current_playlist_index = 0;
+            self.update_playing_status();
+            return Ok(());
+        }
+    
+        // Воспроизводим следующий трек
+        if let Some(next_file) = files_to_play.get(self.current_playlist_index) {
+            // println!("🎵 Следующий трек: {}", next_file.display());
+            
+            let file = File::open(next_file)?;
+            let source = Decoder::new(BufReader::new(file))?;
+            
+            let (stream, stream_handle) = OutputStream::try_default()?;
+            let sink = Sink::try_new(&stream_handle)?;
+            sink.append(source);
+            sink.play();
+            
+            self._stream = Some(stream);
+            self.sink = Some(sink);
+            self.is_playing = true;
+            
+            self.update_playing_status();
+        }
+    
+        Ok(())
+    }
+    
     fn check_playback_finished(&mut self) {
         if let Some(sink) = &self.sink {
             if sink.empty() && self.is_playing {
-                // Переходим к следующему треку или останавливаемся
-                self.is_playing = false;
-                self.update_playing_status();
+                // println!("🎵 Трек завершен, переходим к следующему");
+                if let Err(e) = self.play_next() {
+                    eprintln!("Ошибка воспроизведения следующего трека: {}", e);
+                    self.is_playing = false;
+                    self.update_playing_status();
+                }
             }
         }
     }
@@ -535,6 +639,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Left => {
                         if let Err(e) = app.leave_directory() {
                             eprintln!("Ошибка: {}", e);
+                        }
+                    },
+                    // В блоке обработки клавиш добавь:
+                    KeyCode::Char('n') => { // Next track
+                        if let Err(e) = app.next_track() {
+                            eprintln!("Ошибка переключения трека: {}", e);
+                        }
+                    },
+                    KeyCode::Char('p') => { // Previous track  
+                        if let Err(e) = app.previous_track() {
+                            eprintln!("Ошибка переключения трека: {}", e);
                         }
                     },
                     
