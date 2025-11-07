@@ -33,10 +33,10 @@ mod theme {
     pub const SURFACE: Color = Color::Rgb(53, 52, 54);           // #14161C - поверхность
     
     // Акцентные цвета
-    pub const PRIMARY: Color = Color::Rgb(190, 116, 190);          // #00B8D4 - бирюзовый
-    pub const SECONDARY: Color = Color::Rgb(142, 89, 178);      // #6496FF - синий
-    pub const SUCCESS: Color = Color::Rgb(76, 175, 80);          // #4CAF50 - зеленый
-    pub const WARNING: Color = Color::Rgb(190, 116, 190);          // #FFC107 - желтый
+    pub const PRIMARY: Color = Color::Rgb(190, 116, 190);          // #00B8D4 - рамки
+    pub const SECONDARY: Color = Color::Rgb(142, 89, 178);      // #6496FF - папки
+    pub const SUCCESS: Color = Color::Rgb(252, 105, 153);          // #4CAF50 - маркированные файлы
+    pub const WARNING: Color = Color::Rgb(190, 116, 190);          // #FFC107 - текст файла под курсором
     
     // Текст
     pub const TEXT_PRIMARY: Color = Color::Rgb(240, 240, 240);   // #F0F0F0 - основной текст
