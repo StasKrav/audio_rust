@@ -23,6 +23,88 @@ use rodio::{Decoder, OutputStream, Sink};
 use std::fs::File;
 use std::io::BufReader;
 
+// -------- цвета -------
+// Цветовая палитра приложения
+mod theme {
+    use ratatui::style::Color;
+    
+    // Основные цвета
+    pub const BACKGROUND: Color = Color::Rgb(10, 12, 15);        // #0A0C0F - глубокий темный
+    pub const SURFACE: Color = Color::Rgb(20, 22, 28);           // #14161C - поверхность
+    
+    // Акцентные цвета
+    pub const PRIMARY: Color = Color::Rgb(0, 184, 212);          // #00B8D4 - бирюзовый
+    pub const SECONDARY: Color = Color::Rgb(100, 150, 255);      // #6496FF - синий
+    pub const SUCCESS: Color = Color::Rgb(76, 175, 80);          // #4CAF50 - зеленый
+    pub const WARNING: Color = Color::Rgb(255, 193, 7);          // #FFC107 - желтый
+    
+    // Текст
+    pub const TEXT_PRIMARY: Color = Color::Rgb(240, 240, 240);   // #F0F0F0 - основной текст
+    pub const TEXT_SECONDARY: Color = Color::Rgb(180, 180, 190); // #B4B4BE - второстепенный
+    pub const TEXT_DISABLED: Color = Color::Rgb(100, 100, 110);  // #64646E - отключенный
+    
+    // Состояния
+    pub const HOVER: Color = Color::Rgb(40, 42, 50);             // #282A32 - при наведении
+    pub const SELECTED: Color = Color::Rgb(30, 32, 40);          // #1E2028 - выделенный
+    pub const ACTIVE: Color = Color::Rgb(0, 150, 200);           // #0096C8 - активный
+}
+
+// Стили для конкретных элементов
+mod styles {
+    use ratatui::style::{Color, Style};
+    use super::theme;
+    
+    // Панели
+    pub fn active_panel() -> Style {
+        Style::default().fg(theme::PRIMARY)
+    }
+    
+    pub fn inactive_panel() -> Style {
+        Style::default().fg(theme::TEXT_DISABLED)
+    }
+    
+    // Выделение
+    pub fn highlight_active() -> Style {
+        Style::default()
+            .fg(theme::WARNING)
+            .bg(theme::SELECTED)
+    }
+    
+    pub fn highlight_inactive() -> Style {
+        Style::default()
+            .fg(theme::TEXT_DISABLED)
+            .bg(theme::BACKGROUND)
+    }
+    
+    // Элементы
+    pub fn folder() -> Style {
+        Style::default().fg(theme::SECONDARY)
+    }
+    
+    pub fn selected_file() -> Style {
+        Style::default().fg(theme::SUCCESS)
+    }
+    
+    pub fn playing_track() -> Style {
+        Style::default().fg(theme::SUCCESS)
+    }
+    
+    pub fn normal_file() -> Style {
+        Style::default().fg(theme::TEXT_SECONDARY)
+    }
+    
+    // Фоны
+    pub fn background() -> Style {
+        Style::default().bg(theme::BACKGROUND)
+    }
+    
+    pub fn surface() -> Style {
+        Style::default().bg(theme::SURFACE)
+    }
+}
+// ------------------------------------
+
+
 #[derive(Parser)]
 #[command(name = "Hi-Res Player")]
 #[command(about = "Файловый менеджер и плеер для hi-res аудио")]
@@ -748,38 +830,95 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
-    // Используем всё пространство для двух колонок
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
+    use theme::*;
+    use styles::*;
+    
+    // Фон всего приложения
+    frame.render_widget(Block::default().style(background()), frame.size());
+    
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(50), // Файлы
-            Constraint::Percentage(50), // Плейлист
+            Constraint::Min(1),
+            Constraint::Length(3),
         ])
         .split(frame.size());
 
-    // Файловый менеджер (левая панель)
-    let files: Vec<ListItem> = app.files
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
+        .split(chunks[0]);
+   // Файловый менеджер
+        let files: Vec<ListItem> = app.files
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let icon = if entry.is_dir { "📁 " } else { "○ " };
+                let selection_indicator = if entry.selected { "█ " } else { "  " };
+                
+                let style = if app.active_panel == 0 {
+                    if Some(i) == app.files_list_state.selected() {
+                        Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)
+                    } else if entry.selected {
+                        selected_file()
+                    } else if entry.is_dir {
+                        folder()
+                    } else {
+                        normal_file()
+                    }
+                } else {
+                    normal_file()
+                };
+    
+                let content = Line::from(vec![
+                    Span::styled(selection_indicator, style),
+                    Span::styled(icon, style),
+                    Span::styled(&entry.name, style),
+                ]);
+                
+                ListItem::new(content)
+            })
+            .collect();
+    
+        let files_block_style = if app.active_panel == 0 {
+            active_panel()
+        } else {
+            inactive_panel()
+        };
+    
+        let files_list = List::new(files)
+            .block(Block::default().borders(Borders::ALL).title(" ФАЙЛОВЫЙ МЕНЕДЖЕР ").border_style(files_block_style).style(surface()))
+            .highlight_style(if app.active_panel == 0 {
+                highlight_active()
+            } else {
+                highlight_inactive()
+            });
+        
+        frame.render_stateful_widget(files_list, columns[0], &mut app.files_list_state.clone());
+
+    // Плейлист (правая панель)
+    // Аналогично для плейлиста
+    // Плейлист (правая панель)
+    let playlist: Vec<ListItem> = app.playlist
         .iter()
         .enumerate()
         .map(|(i, entry)| {
-            let icon = if entry.is_dir { " " } else { " " };
-            let selection_indicator = if entry.selected { "█ " } else { "  " };
+            let icon = if entry.playing { "▶ " } else { "○ " };
+            let selection_indicator = "  "; // В плейлисте нет множественного выделения
             
-            // Если панель неактивна - все элементы серые
-            let style = if app.active_panel == 0 {
-                // Активная панель - цветные элементы
-                if Some(i) == app.files_list_state.selected() {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else if entry.selected {
-                    Style::default().fg(Color::Green)
-                } else if entry.is_dir {
-                    Style::default().fg(Color::Blue)
+            let style = if app.active_panel == 1 {
+                if Some(i) == app.playlist_list_state.selected() {
+                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::BOLD)
+                } else if entry.playing {
+                    styles::playing_track()
                 } else {
-                    Style::default().fg(Color::Gray)
+                    styles::normal_file()
                 }
             } else {
-                // Неактивная панель - все серые
-                Style::default().fg(Color::DarkGray)
+                styles::normal_file()
             };
     
             let content = Line::from(vec![
@@ -791,73 +930,19 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
             ListItem::new(content)
         })
         .collect();
-
-    // Файловый менеджер - стиль границы
-    let files_block_style = if app.active_panel == 0 {
-        Style::default().fg(Color::Yellow) // Активная - желтая
-    } else {
-        Style::default().fg(Color::DarkGray) // Неактивная - серая
-    };
-
-    let files_list = List::new(files)
-        .block(Block::default().borders(Borders::ALL).title(" ФАЙЛОВЫЙ МЕНЕДЖЕР ").border_style(files_block_style))
-        .highlight_style(if app.active_panel == 0 {
-            // Активная панель - яркое выделение
-            Style::default().fg(Color::Yellow).bg(Color::DarkGray)
-        } else {
-            // Неактивная панель - тусклое выделение
-            Style::default().fg(Color::DarkGray).bg(Color::Black)
-        });
     
-    frame.render_stateful_widget(files_list, columns[0], &mut app.files_list_state.clone());
-
-    // Плейлист (правая панель)
-    // Аналогично для плейлиста
-    let playlist: Vec<ListItem> = app.playlist
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let icon = if entry.playing { "▶ " } else { " " };
-            
-            // Если панель неактивна - все элементы серые
-            let style = if app.active_panel == 1 {
-                // Активная панель
-                if Some(i) == app.playlist_list_state.selected() {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else if entry.playing {
-                    Style::default().fg(Color::Green)
-                } else {
-                    Style::default().fg(Color::Gray)
-                }
-            } else {
-                // Неактивная панель
-                Style::default().fg(Color::DarkGray)
-            };
-    
-            let content = Line::from(vec![
-                Span::styled(icon, style),
-                Span::styled(&entry.name, style),
-            ]);
-            
-            ListItem::new(content)
-        })
-        .collect();
-
-    // Плейлист - стиль границы  
     let playlist_block_style = if app.active_panel == 1 {
-        Style::default().fg(Color::Yellow) // Активная - желтая
+        styles::active_panel()
     } else {
-        Style::default().fg(Color::DarkGray) // Неактивная - серая
+        styles::inactive_panel()
     };
-
+    
     let playlist_list = List::new(playlist)
-        .block(Block::default().borders(Borders::ALL).title(" ПЛЕЙЛИСТ ").border_style(playlist_block_style))
+        .block(Block::default().borders(Borders::ALL).title(" ПЛЕЙЛИСТ ").border_style(playlist_block_style).style(styles::surface()))
         .highlight_style(if app.active_panel == 1 {
-            // Активная панель - яркое выделение
-            Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+            styles::highlight_active()
         } else {
-            // Неактивная панель - тусклое выделение
-            Style::default().fg(Color::DarkGray).bg(Color::Black)
+            styles::highlight_inactive()
         });
     
     frame.render_stateful_widget(playlist_list, columns[1], &mut app.playlist_list_state.clone());
