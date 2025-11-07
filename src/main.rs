@@ -8,7 +8,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
         Block, Borders, List, ListItem, ListState,
@@ -29,29 +29,29 @@ mod theme {
     use ratatui::style::Color;
     
     // Основные цвета
-    pub const BACKGROUND: Color = Color::Rgb(10, 12, 15);        // #0A0C0F - глубокий темный
-    pub const SURFACE: Color = Color::Rgb(20, 22, 28);           // #14161C - поверхность
+    pub const BACKGROUND: Color = Color::Rgb(53, 52, 54);        // #0A0C0F - глубокий темный
+    pub const SURFACE: Color = Color::Rgb(53, 52, 54);           // #14161C - поверхность
     
     // Акцентные цвета
-    pub const PRIMARY: Color = Color::Rgb(0, 184, 212);          // #00B8D4 - бирюзовый
-    pub const SECONDARY: Color = Color::Rgb(100, 150, 255);      // #6496FF - синий
+    pub const PRIMARY: Color = Color::Rgb(190, 116, 190);          // #00B8D4 - бирюзовый
+    pub const SECONDARY: Color = Color::Rgb(142, 89, 178);      // #6496FF - синий
     pub const SUCCESS: Color = Color::Rgb(76, 175, 80);          // #4CAF50 - зеленый
-    pub const WARNING: Color = Color::Rgb(255, 193, 7);          // #FFC107 - желтый
+    pub const WARNING: Color = Color::Rgb(190, 116, 190);          // #FFC107 - желтый
     
     // Текст
     pub const TEXT_PRIMARY: Color = Color::Rgb(240, 240, 240);   // #F0F0F0 - основной текст
-    pub const TEXT_SECONDARY: Color = Color::Rgb(180, 180, 190); // #B4B4BE - второстепенный
-    pub const TEXT_DISABLED: Color = Color::Rgb(100, 100, 110);  // #64646E - отключенный
+    pub const TEXT_SECONDARY: Color = Color::Rgb(160, 160, 160); // #B4B4BE - второстепенный
+    pub const TEXT_DISABLED: Color = Color::Rgb(80, 80, 80);  // #64646E - отключенный
     
     // Состояния
-    pub const HOVER: Color = Color::Rgb(40, 42, 50);             // #282A32 - при наведении
-    pub const SELECTED: Color = Color::Rgb(30, 32, 40);          // #1E2028 - выделенный
-    pub const ACTIVE: Color = Color::Rgb(0, 150, 200);           // #0096C8 - активный
+    // pub const HOVER: Color = Color::Rgb(40, 42, 50);             // #282A32 - при наведении
+    pub const SELECTED: Color = Color::Rgb(63, 62, 64);          // #1E2028 - выделенный
+    // pub const ACTIVE: Color = Color::Rgb(0, 150, 200);           // #0096C8 - активный
 }
 
 // Стили для конкретных элементов
 mod styles {
-    use ratatui::style::{Color, Style};
+    use ratatui::style::{Style};
     use super::theme;
     
     // Панели
@@ -91,6 +91,9 @@ mod styles {
     
     pub fn normal_file() -> Style {
         Style::default().fg(theme::TEXT_SECONDARY)
+    }
+    pub fn inactive_text() -> Style {
+        Style::default().fg(theme::TEXT_DISABLED)  // Более тусклый цвет
     }
     
     // Фоны
@@ -856,7 +859,7 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
             .iter()
             .enumerate()
             .map(|(i, entry)| {
-                let icon = if entry.is_dir { "📁 " } else { "○ " };
+                let icon = if entry.is_dir { " " } else { " " };
                 let selection_indicator = if entry.selected { "█ " } else { "  " };
                 
                 let style = if app.active_panel == 0 {
@@ -870,7 +873,7 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
                         normal_file()
                     }
                 } else {
-                    normal_file()
+                    styles::inactive_text()  // Вместо styles::normal_file()
                 };
     
                 let content = Line::from(vec![
@@ -906,7 +909,7 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, entry)| {
-            let icon = if entry.playing { "▶ " } else { "○ " };
+            let icon = if entry.playing { "▶ " } else { " " };
             let selection_indicator = "  "; // В плейлисте нет множественного выделения
             
             let style = if app.active_panel == 1 {
@@ -918,7 +921,7 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
                     styles::normal_file()
                 }
             } else {
-                styles::normal_file()
+                styles::inactive_text()  // Вместо styles::normal_file()
             };
     
             let content = Line::from(vec![
