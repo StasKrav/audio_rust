@@ -10,104 +10,99 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, ListState, Paragraph, 
-    },
+    widgets::{Block, ListState, Paragraph},
     Terminal,
 };
+use rodio::{Decoder, OutputStream, Sink};
 use std::env;
 use std::fs;
+use std::fs::File;
 use std::io;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use rodio::{Decoder, OutputStream, Sink};
-use std::fs::File;
-use std::io::BufReader;
 
 // -------- цвета -------
 // Цветовая палитра приложения
 mod theme {
     use ratatui::style::Color;
-    
+
     // Основные цвета
-    pub const BACKGROUND: Color = Color::Rgb(53, 52, 54);        // #0A0C0F - глубокий темный
-    pub const SURFACE: Color = Color::Rgb(53, 52, 54);           // #14161C - поверхность
-    
+    pub const BACKGROUND: Color = Color::Rgb(53, 52, 54); // #0A0C0F - глубокий темный
+    pub const SURFACE: Color = Color::Rgb(53, 52, 54); // #14161C - поверхность
+
     // Акцентные цвета
-    pub const PRIMARY: Color = Color::Rgb(190, 116, 190);          // #00B8D4 - рамки
-    pub const SECONDARY: Color = Color::Rgb(142, 89, 178);      // #6496FF - папки
-    pub const SUCCESS: Color = Color::Rgb(252, 105, 153);          // #4CAF50 - маркированные файлы
-    pub const WARNING: Color = Color::Rgb(190, 116, 190);          // #FFC107 - текст файла под курсором
-    
+    pub const PRIMARY: Color = Color::Rgb(190, 116, 190); // #00B8D4 - рамки
+    pub const SECONDARY: Color = Color::Rgb(142, 89, 178); // #6496FF - папки
+    pub const SUCCESS: Color = Color::Rgb(252, 105, 153); // #4CAF50 - маркированные файлы
+    pub const WARNING: Color = Color::Rgb(190, 116, 190); // #FFC107 - текст файла под курсором
+
     // Текст
-    pub const TEXT_PRIMARY: Color = Color::Rgb(240, 240, 240);   // #F0F0F0 - основной текст
+    pub const TEXT_PRIMARY: Color = Color::Rgb(240, 240, 240); // #F0F0F0 - основной текст
     pub const TEXT_SECONDARY: Color = Color::Rgb(160, 160, 160); // #B4B4BE - второстепенный
-    pub const TEXT_DISABLED: Color = Color::Rgb(80, 80, 80);  // #64646E - отключенный
-    
+    pub const TEXT_DISABLED: Color = Color::Rgb(80, 80, 80); // #64646E - отключенный
+
     // Состояния
     // pub const HOVER: Color = Color::Rgb(40, 42, 50);             // #282A32 - при наведении
-    pub const SELECTED: Color = Color::Rgb(63, 62, 64);          // #1E2028 - выделенный
-    // pub const ACTIVE: Color = Color::Rgb(0, 150, 200);           // #0096C8 - активный
+    pub const SELECTED: Color = Color::Rgb(63, 62, 64); // #1E2028 - выделенный
+                                                        // pub const ACTIVE: Color = Color::Rgb(0, 150, 200);           // #0096C8 - активный
 }
 
 // Стили для конкретных элементов
 mod styles {
-    use ratatui::style::{Style};
     use super::theme;
-    
+    use ratatui::style::Style;
+
     // Панели
     pub fn active_panel() -> Style {
         Style::default().fg(theme::PRIMARY)
     }
-    
+
     pub fn inactive_panel() -> Style {
         Style::default().fg(theme::TEXT_DISABLED)
     }
-    
+
     // Выделение
     pub fn highlight_active() -> Style {
-        Style::default()
-            .fg(theme::WARNING)
-            .bg(theme::SELECTED)
+        Style::default().fg(theme::WARNING).bg(theme::SELECTED)
     }
-    
+
     pub fn highlight_inactive() -> Style {
         Style::default()
             .fg(theme::TEXT_DISABLED)
             .bg(theme::BACKGROUND)
     }
-    
+
     // Элементы
     pub fn folder() -> Style {
         Style::default().fg(theme::SECONDARY)
     }
-    
+
     pub fn selected_file() -> Style {
         Style::default().fg(theme::SUCCESS)
     }
-    
+
     pub fn playing_track() -> Style {
         Style::default().fg(theme::SUCCESS)
     }
-    
+
     pub fn normal_file() -> Style {
         Style::default().fg(theme::TEXT_SECONDARY)
     }
     pub fn inactive_text() -> Style {
-        Style::default().fg(theme::TEXT_DISABLED)  // Более тусклый цвет
+        Style::default().fg(theme::TEXT_DISABLED) // Более тусклый цвет
     }
-    
+
     // Фоны
     pub fn background() -> Style {
         Style::default().bg(theme::BACKGROUND)
     }
-    
+
     pub fn surface() -> Style {
         Style::default().bg(theme::SURFACE)
     }
 }
 // ------------------------------------
-
 
 #[derive(Parser)]
 #[command(name = "Hi-Res Player")]
@@ -129,15 +124,14 @@ struct FileEntry {
 struct PlaylistEntry {
     path: PathBuf,
     name: String,
-    playing: bool,  // Добавляем флаг воспроизведения
+    playing: bool,                         // Добавляем флаг воспроизведения
     duration: Option<std::time::Duration>, // Добавляем длительность
-    
 }
 fn get_audio_duration(path: &Path) -> Option<std::time::Duration> {
     use rodio::{Decoder, Source};
     use std::fs::File;
     use std::io::BufReader;
-    
+
     match File::open(path) {
         Ok(file) => {
             if let Ok(source) = Decoder::new(BufReader::new(file)) {
@@ -168,33 +162,32 @@ struct App {
     files_list_state: ListState,
     playlist_list_state: ListState,
     active_panel: usize,
-    _stream: Option<OutputStream>,  // Сохраняем stream чтобы он не удалялся
+    _stream: Option<OutputStream>, // Сохраняем stream чтобы он не удалялся
     sink: Option<Sink>,
     current_playlist_index: usize,
     is_playing: bool,
     current_playing_path: Option<PathBuf>,
-    
-    
 }
 
 impl App {
     fn new(start_dir: Option<String>) -> Result<Self, Box<dyn std::error::Error>> {
         let (current_dir, initial_file) = if let Some(dir) = start_dir {
             let path = PathBuf::from(&dir);
-            
+
             // Пробуем найти файл/папку относительно текущей директории
             let absolute_path = if path.is_absolute() {
                 path
             } else {
                 std::env::current_dir()?.join(path)
             };
-    
+
             if absolute_path.exists() {
                 if absolute_path.is_dir() {
                     (absolute_path, None)
                 } else if absolute_path.is_file() {
                     // Если передан файл - берем его директорию и запоминаем файл
-                    let parent = absolute_path.parent()
+                    let parent = absolute_path
+                        .parent()
                         .map(|p| p.to_path_buf())
                         .unwrap_or_else(|| PathBuf::from("."));
                     (parent, Some(absolute_path))
@@ -211,10 +204,10 @@ impl App {
                 .unwrap_or_else(|_| PathBuf::from("/"));
             (home_dir, None)
         };
-    
+
         // Канонизируем путь (убираем ../ и ./)
         let current_dir = current_dir.canonicalize().unwrap_or(current_dir);
-        
+
         let mut app = App {
             current_dir,
             files: Vec::new(),
@@ -228,9 +221,9 @@ impl App {
             is_playing: false,
             current_playing_path: None,
         };
-        
+
         app.load_directory()?;
-        
+
         // Если был передан файл - добавляем его в плейлист и начинаем воспроизведение
         // В методе new(), где добавляем начальный файл в плейлист:
         if let Some(file_path) = initial_file {
@@ -242,108 +235,108 @@ impl App {
                     playing: false,
                     duration, // Добавляем длительность
                 });
-                
+
                 // Начинаем воспроизведение
                 app.play()?;
             }
         }
-        
+
         Ok(app)
     }
-    
-        // F1 - Показать справку (заглушка)
-        fn show_help(&self) {
-            // TODO: реализовать модальное окно со справкой
-            println!("📖 Справка будет реализована в модальном окне");
-        }
-        
-        // F2 - Play
-        fn play(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            // Если на паузе - продолжаем
-            if let Some(sink) = &self.sink {
-                if sink.is_paused() {
-                    sink.play();
-                    self.is_playing = true;
-                    // println!("▶ Продолжено воспроизведение");
-                    return Ok(());
-                }
+
+    // F1 - Показать справку (заглушка)
+    fn show_help(&self) {
+        // TODO: реализовать модальное окно со справкой
+        println!("📖 Справка будет реализована в модальном окне");
+    }
+
+    // F2 - Play
+    fn play(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Если на паузе - продолжаем
+        if let Some(sink) = &self.sink {
+            if sink.is_paused() {
+                sink.play();
+                self.is_playing = true;
+                // println!("▶ Продолжено воспроизведение");
+                return Ok(());
             }
-            
-            // Иначе начинаем новое воспроизведение
-            // println!("▶ Запуск воспроизведения");
-            self.start_playback()?;
-            Ok(())
         }
-        
-        // F3 - Pause/Unpause
-        fn pause(&mut self) {
-            if let Some(sink) = &self.sink {
-                if sink.is_paused() {
-                    // Если уже на паузе - продолжаем
-                    sink.play();
-                    self.is_playing = true;
-                    // println!("▶ Продолжено воспроизведение");
-                } else {
-                    // Ставим на паузу
-                    sink.pause();
-                    self.is_playing = false;
-                    // println!("⏸ Пауза");
-                }
+
+        // Иначе начинаем новое воспроизведение
+        // println!("▶ Запуск воспроизведения");
+        self.start_playback()?;
+        Ok(())
+    }
+
+    // F3 - Pause/Unpause
+    fn pause(&mut self) {
+        if let Some(sink) = &self.sink {
+            if sink.is_paused() {
+                // Если уже на паузе - продолжаем
+                sink.play();
+                self.is_playing = true;
+                // println!("▶ Продолжено воспроизведение");
             } else {
-                // println!("⚠ Нет активного воспроизведения для паузы");
+                // Ставим на паузу
+                sink.pause();
+                self.is_playing = false;
+                // println!("⏸ Пауза");
             }
+        } else {
+            // println!("⚠ Нет активного воспроизведения для паузы");
         }
-        
-        // F4 - Stop
-        fn stop(&mut self) {
-            if let Some(sink) = &self.sink {
-                sink.stop();
-                // println!("⏹ Остановлено");
-            } else {
-                // println!("⚠ Нет активного воспроизведения для остановки");
-            }
-            self.sink = None;
-            self._stream = None;
-            self.is_playing = false;
-            self.current_playing_path = None;
-            self.update_playing_status();
-        
-     }     
-        // F7 - Перемотка назад на 10 секунд (заглушка)
-        fn rewind_backward(&mut self) {
-            // println!("⏪ Перемотка назад на 10 сек (реализуется позже)");
+    }
+
+    // F4 - Stop
+    fn stop(&mut self) {
+        if let Some(sink) = &self.sink {
+            sink.stop();
+            // println!("⏹ Остановлено");
+        } else {
+            // println!("⚠ Нет активного воспроизведения для остановки");
         }
-        
-        // F8 - Перемотка вперед на 10 секунд (заглушка)
-        fn rewind_forward(&mut self) {
-            // println!("⏩ Перемотка вперед на 10 сек (реализуется позже)");
-        }
-    
+        self.sink = None;
+        self._stream = None;
+        self.is_playing = false;
+        self.current_playing_path = None;
+        self.update_playing_status();
+    }
+    // F7 - Перемотка назад на 10 секунд (заглушка)
+    fn rewind_backward(&mut self) {
+        // println!("⏪ Перемотка назад на 10 сек (реализуется позже)");
+    }
+
+    // F8 - Перемотка вперед на 10 секунд (заглушка)
+    fn rewind_forward(&mut self) {
+        // println!("⏩ Перемотка вперед на 10 сек (реализуется позже)");
+    }
+
     fn load_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.files.clear();
-        
+
         let entries = fs::read_dir(&self.current_dir)?;
         let mut dirs = Vec::new();
         let mut audio_files = Vec::new();
-        
+
         for entry in entries {
             if let Ok(entry) = entry {
                 let path = entry.path();
-                
+
                 // Пропускаем скрытые файлы/папки
                 if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                     if file_name.starts_with('.') {
                         continue;
                     }
                 }
-                
+
                 let is_dir = path.is_dir();
-                
+
                 if is_dir {
                     dirs.push(FileEntry {
                         path: path.clone(),
                         is_dir: true,
-                        name: path.file_name()
+                        name: path
+                            .file_name()
                             .and_then(|n| n.to_str())
                             .map(|s| format!("{}/", s))
                             .unwrap_or_else(|| "Unknown/".to_string()),
@@ -355,7 +348,8 @@ impl App {
                     audio_files.push(FileEntry {
                         path: path.clone(),
                         is_dir: false,
-                        name: path.file_name()
+                        name: path
+                            .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("Unknown")
                             .to_string(),
@@ -365,19 +359,19 @@ impl App {
                 }
             }
         }
-        
+
         // Сортируем: сначала папки, потом файлы
         dirs.sort_by(|a, b| a.name.cmp(&b.name));
         audio_files.sort_by(|a, b| a.name.cmp(&b.name));
-        
+
         self.files.extend(dirs);
         self.files.extend(audio_files);
-        
+
         // Выбираем первый элемент
         if !self.files.is_empty() {
             self.files_list_state.select(Some(0));
         }
-        
+
         Ok(())
     }
 
@@ -425,8 +419,6 @@ impl App {
         }
     }
 
-
-
     fn leave_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.active_panel == 0 {
             if let Some(parent) = self.current_dir.parent() {
@@ -451,12 +443,13 @@ impl App {
 
     fn move_selected_to_playlist(&mut self) {
         if self.active_panel == 0 {
-            let selected_files: Vec<FileEntry> = self.files
+            let selected_files: Vec<FileEntry> = self
+                .files
                 .iter()
                 .filter(|entry| entry.selected && !entry.is_dir)
                 .cloned()
                 .collect();
-            
+
             for file in selected_files {
                 self.playlist.push(PlaylistEntry {
                     path: file.path.clone(),
@@ -465,7 +458,7 @@ impl App {
                     duration: file.duration, // Копируем длительность
                 });
             }
-            
+
             // Снимаем выделение после перемещения
             for entry in &mut self.files {
                 entry.selected = false;
@@ -513,18 +506,18 @@ impl App {
             if let Some(selected) = self.playlist_list_state.selected() {
                 if selected < self.playlist.len() {
                     let _removed = self.playlist.remove(selected);
-                    
+
                     // Обновляем выделение
                     if self.playlist.is_empty() {
                         self.playlist_list_state.select(None);
                     } else if selected >= self.playlist.len() {
-                        self.playlist_list_state.select(Some(self.playlist.len() - 1));
+                        self.playlist_list_state
+                            .select(Some(self.playlist.len() - 1));
                     }
                 }
             }
         }
     }
-    
 
     // Увеличение громкости
     fn volume_up(&mut self) {
@@ -534,7 +527,7 @@ impl App {
             // println!("🔊 Громкость: {:.0}%", new_volume * 100.0);
         }
     }
-    
+
     // Уменьшение громкости
     fn volume_down(&mut self) {
         if let Some(sink) = &self.sink {
@@ -547,106 +540,109 @@ impl App {
         self.active_panel = (self.active_panel + 1) % 2;
     }
 
-    
-        // Переименовываем старый метод play в start_playback
-        fn start_playback(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            // Останавливаем текущее воспроизведение
-            if let Some(sink) = &self.sink {
-                sink.stop();
-            }
-    
-            // Определяем какой файл воспроизводить
-            let file_to_play = match self.active_panel {
-                0 => {
-                    if let Some(selected) = self.files_list_state.selected() {
-                        self.files.get(selected)
-                            .filter(|entry| !entry.is_dir)
-                            .map(|entry| entry.path.clone())
-                    } else {
-                        None
-                    }
-                }
-                1 => {
-                    if let Some(selected) = self.playlist_list_state.selected() {
-                        self.playlist.get(selected).map(|entry| entry.path.clone())
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-    
-            if let Some(path) = file_to_play {
-                // Сохраняем путь текущего играющего файла
-                self.current_playing_path = Some(path.clone());
-                
-                // Создаем аудио-плеер
-                let (stream, stream_handle) = OutputStream::try_default()?;
-                let sink = Sink::try_new(&stream_handle)?;
-    
-                let file = File::open(&path)?;
-                let source = Decoder::new(BufReader::new(file))?;
-                sink.append(source);
-                sink.play();
-                
-                self._stream = Some(stream);
-                self.sink = Some(sink);
-                self.is_playing = true;
-                
-                self.update_playing_status();
-            }
-    
-            Ok(())
+    // Переименовываем старый метод play в start_playback
+    fn start_playback(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Останавливаем текущее воспроизведение
+        if let Some(sink) = &self.sink {
+            sink.stop();
         }
-    
-    
+
+        // Определяем какой файл воспроизводить
+        let file_to_play = match self.active_panel {
+            0 => {
+                if let Some(selected) = self.files_list_state.selected() {
+                    self.files
+                        .get(selected)
+                        .filter(|entry| !entry.is_dir)
+                        .map(|entry| entry.path.clone())
+                } else {
+                    None
+                }
+            }
+            1 => {
+                if let Some(selected) = self.playlist_list_state.selected() {
+                    self.playlist.get(selected).map(|entry| entry.path.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(path) = file_to_play {
+            // Сохраняем путь текущего играющего файла
+            self.current_playing_path = Some(path.clone());
+
+            // Создаем аудио-плеер
+            let (stream, stream_handle) = OutputStream::try_default()?;
+            let sink = Sink::try_new(&stream_handle)?;
+
+            let file = File::open(&path)?;
+            let source = Decoder::new(BufReader::new(file))?;
+            sink.append(source);
+            sink.play();
+
+            self._stream = Some(stream);
+            self.sink = Some(sink);
+            self.is_playing = true;
+
+            self.update_playing_status();
+        }
+
+        Ok(())
+    }
+
     fn next_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // println!("⏭️ Следующий трек");
-        self.play_next()  // <-- Использовать правильный метод
+        self.play_next() // <-- Использовать правильный метод
     }
-    
+
     fn previous_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // println!("⏮️ Предыдущий трек");
-        
+
         if self.current_playlist_index > 0 {
             // Переходим к предыдущему треку в очереди
             self.current_playlist_index -= 1;
-            
+
             // Останавливаем текущее воспроизведение
             if let Some(sink) = &self.sink {
                 sink.stop();
             }
-            
+
             // Определяем список файлов для воспроизведения (упрощенная логика, как в play_next)
-            let files_to_play: Vec<PathBuf> = self.playlist.iter().map(|entry| entry.path.clone()).collect();
-    
+            let files_to_play: Vec<PathBuf> = self
+                .playlist
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect();
+
             // Воспроизводим предыдущий трек
             if self.current_playlist_index < files_to_play.len() {
                 if let Some(prev_file) = files_to_play.get(self.current_playlist_index) {
                     // println!("🎵 Предыдущий трек: {}", prev_file.display());
-                    
+
                     // ОБНОВЛЯЕМ ПУТЬ ТЕКУЩЕГО ТРЕКА (исправление проблемы)
                     self.current_playing_path = Some(prev_file.clone());
-                    
+
                     let file = File::open(prev_file)?;
                     let source = Decoder::new(BufReader::new(file))?;
-                    
+
                     let (stream, stream_handle) = OutputStream::try_default()?;
                     let sink = Sink::try_new(&stream_handle)?;
                     sink.append(source);
                     sink.play();
-                    
+
                     self._stream = Some(stream);
                     self.sink = Some(sink);
                     self.is_playing = true;
-                    
+
                     self.update_playing_status();
                 }
             }
         } else {
             // println!("🎵 Это первый трек, перемотка невозможна");
         }
-        
+
         Ok(())
     }
 
@@ -655,7 +651,7 @@ impl App {
         for entry in &mut self.playlist {
             entry.playing = false;
         }
-        
+
         // Помечаем текущий играющий трек
         if let Some(current_path) = &self.current_playing_path {
             for entry in &mut self.playlist {
@@ -666,19 +662,21 @@ impl App {
             }
         }
     }
-    
-      
 
     fn play_next(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(sink) = &self.sink {
             sink.stop();
         }
-    
+
         self.current_playlist_index += 1;
-        
+
         // Определяем следующий файл для воспроизведения
-        let files_to_play: Vec<PathBuf> = self.playlist.iter().map(|entry| entry.path.clone()).collect();
-        
+        let files_to_play: Vec<PathBuf> = self
+            .playlist
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+
         // Проверяем есть ли еще треки
         if self.current_playlist_index >= files_to_play.len() {
             self.is_playing = false;
@@ -687,30 +685,30 @@ impl App {
             self.update_playing_status();
             return Ok(());
         }
-    
+
         // Воспроизводим следующий трек
         if let Some(next_file) = files_to_play.get(self.current_playlist_index) {
             // ОБНОВЛЯЕМ ПУТЬ ТЕКУЩЕГО ТРЕКА
             self.current_playing_path = Some(next_file.clone());
-            
+
             let file = File::open(next_file)?;
             let source = Decoder::new(BufReader::new(file))?;
-            
+
             let (stream, stream_handle) = OutputStream::try_default()?;
             let sink = Sink::try_new(&stream_handle)?;
             sink.append(source);
             sink.play();
-            
+
             self._stream = Some(stream);
             self.sink = Some(sink);
             self.is_playing = true;
-            
+
             self.update_playing_status();
         }
-    
+
         Ok(())
     }
-    
+
     fn check_playback_finished(&mut self) {
         if let Some(sink) = &self.sink {
             if sink.empty() && self.is_playing {
@@ -734,11 +732,11 @@ fn is_audio_file(path: &Path) -> bool {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	  // Увеличиваем размер аудиобуфера для предотвращения underrun
+    // Увеличиваем размер аудиобуфера для предотвращения underrun
     env::set_var("RUST_AUDIO_BACKEND_BUFFER_SIZE", "512");
     env::set_var("RUST_AUDIO_LATENCY", "0.1");
     let cli = Cli::parse();
-    
+
     // Создаем приложение
     let mut app = App::new(cli.folder)?;
 
@@ -753,7 +751,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     'main: loop {
         // Проверяем окончание воспроизведения
         app.check_playback_finished();
-        
+
         // Отрисовываем интерфейс
         terminal.draw(|f| ui(f, &app))?;
 
@@ -762,43 +760,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     // В main loop, в match key.code { ... }:
-                    
+
                     // Группа 1: Основное управление (F1-F4)
                     KeyCode::F(1) => app.show_help(),
                     KeyCode::F(2) => {
                         if let Err(e) = app.play() {
                             eprintln!("Ошибка воспроизведения: {}", e);
                         }
-                    },
+                    }
                     KeyCode::F(3) => app.pause(),
                     KeyCode::F(4) => app.stop(),
-                    
+
                     // Группа 2: Навигация по трекам (F5-F8)
                     KeyCode::F(5) => {
                         if let Err(e) = app.previous_track() {
                             eprintln!("Ошибка переключения трека: {}", e);
                         }
-                    },
+                    }
                     KeyCode::F(6) => {
                         if let Err(e) = app.next_track() {
                             eprintln!("Ошибка переключения трека: {}", e);
                         }
-                    },
+                    }
                     KeyCode::F(7) => app.rewind_backward(),
                     KeyCode::F(8) => app.rewind_forward(),
                     KeyCode::Char('q') | KeyCode::Esc => break 'main,
                     KeyCode::Tab => app.switch_panel(),
-                    
-                    
-                    
+
                     // Громкость
                     KeyCode::Char('+') => {
                         app.volume_up();
-                    },
+                    }
                     KeyCode::Char('-') => {
                         app.volume_down();
-                    },
-                    
+                    }
+
                     // Навигация и выделение
                     KeyCode::Down => {
                         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -807,7 +803,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             app.next_item();
                         }
-                    },
+                    }
                     KeyCode::Up => {
                         if key.modifiers.contains(KeyModifiers::CONTROL) {
                             app.toggle_current_selection();
@@ -815,22 +811,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             app.previous_item();
                         }
-                    },
+                    }
                     KeyCode::Right => {
                         if let Err(e) = app.handle_right_key() {
                             eprintln!("Ошибка: {}", e);
                         }
-                    },
+                    }
                     KeyCode::Left => {
                         if let Err(e) = app.leave_directory() {
                             eprintln!("Ошибка: {}", e);
                         }
-                    },
-                    
+                    }
+
                     // Действия
                     KeyCode::Enter => app.add_to_playlist(),
                     KeyCode::Delete => app.remove_from_playlist(),
-                    
+
                     _ => {}
                 }
             }
@@ -839,10 +835,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Восстанавливаем терминал
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen,)?;
     terminal.show_cursor()?;
 
     println!("🎵 До свидания!");
@@ -852,34 +845,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     // use theme::*;
     use styles::*;
-    
+
     // Фон всего приложения
     frame.render_widget(Block::default().style(background()), frame.size());
-    
+
     let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),        // Основная область (панели)
-                Constraint::Length(2),     // Две пустые строки (разделитель)
-                Constraint::Length(3),     // Статусная строка
-            ])
-            .split(frame.size());
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),    // Основная область (панели)
+            Constraint::Length(2), // Две пустые строки (разделитель)
+            Constraint::Length(3), // Статусная строка
+        ])
+        .split(frame.size());
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[0]);
 
     // Файловый менеджер - разделяем на заголовок, пустую строку и контент
     let files_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // Заголовок
-            Constraint::Length(1),  // Пустая строка (разделитель)
-            Constraint::Min(1),     // Список файлов
+            Constraint::Length(1), // Заголовок
+            Constraint::Length(1), // Пустая строка (разделитель)
+            Constraint::Min(1),    // Список файлов
         ])
         .split(columns[0]);
 
@@ -889,137 +879,140 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     } else {
         inactive_panel()
     };
-    
-    let files_title = Paragraph::new(Line::from(Span::styled(" ФАЙЛОВЫЙ МЕНЕДЖЕР ", files_title_style)))
-        .style(surface());
+
+    let files_title = Paragraph::new(Line::from(Span::styled(
+        " ФАЙЛОВЫЙ МЕНЕДЖЕР ",
+        files_title_style,
+    )))
+    .style(surface());
     frame.render_widget(files_title, files_chunks[0]);
 
     // Рендерим пустую строку-разделитель
     let empty_line = Paragraph::new("").style(surface());
     frame.render_widget(empty_line, files_chunks[1]);
 
+    // Рендерим список файлов вручную для контроля выравнивания
+    let files_area = files_chunks[2];
+    let mut y = 0;
 
-// Рендерим список файлов вручную для контроля выравнивания
-let files_area = files_chunks[2];
-let mut y = 0;
-
-// Вычисляем смещение для скроллинга
-let files_scroll_offset = if let Some(selected) = app.files_list_state.selected() {
-    let visible_items = files_area.height as usize;
-    if selected >= visible_items {
-        selected - visible_items + 1
-    } else {
-        0
-    }
-} else {
-    0
-};
-
-// Рендерим только видимые элементы
-for (i, entry) in app.files.iter().enumerate().skip(files_scroll_offset) {
-    if y >= files_area.height as usize {
-        break;
-    }
-
-    let icon = if entry.is_dir { " " } else { " " };
-    let selection_indicator = if entry.selected { " ●" } else { "  " };
-    
-    let duration_text = if entry.is_dir {
-        "".to_string()
-    } else {
-        format_duration(entry.duration)
-    };
-    
-    // Вычисляем оригинальный индекс для подсветки
-    let original_index = i;
-    
-    let style = if app.active_panel == 0 {
-        if Some(original_index) == app.files_list_state.selected() {
-            Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::BOLD)
-        } else if entry.selected {
-            selected_file()
-        } else if entry.is_dir {
-            folder()
+    // Вычисляем смещение для скроллинга
+    let files_scroll_offset = if let Some(selected) = app.files_list_state.selected() {
+        let visible_items = files_area.height as usize;
+        if selected >= visible_items {
+            selected - visible_items + 1
         } else {
-            normal_file()
+            0
         }
     } else {
-        styles::inactive_text()
+        0
     };
 
-    let duration_style = if app.active_panel == 0 {
-    if Some(original_index) == app.files_list_state.selected() {
-        Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::BOLD)
-    } else if entry.selected {
-        selected_file()
-    } else if entry.is_dir {
-        folder()
-    } else {
-        normal_file()
+    // Рендерим только видимые элементы
+    for (i, entry) in app.files.iter().enumerate().skip(files_scroll_offset) {
+        if y >= files_area.height as usize {
+            break;
+        }
+
+        let icon = if entry.is_dir { " " } else { " " };
+        let selection_indicator = if entry.selected { " ●" } else { "  " };
+
+        let duration_text = if entry.is_dir {
+            "".to_string()
+        } else {
+            format_duration(entry.duration)
+        };
+
+        // Вычисляем оригинальный индекс для подсветки
+        let original_index = i;
+
+        let style = if app.active_panel == 0 {
+            if Some(original_index) == app.files_list_state.selected() {
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+            } else if entry.selected {
+                selected_file()
+            } else if entry.is_dir {
+                folder()
+            } else {
+                normal_file()
+            }
+        } else {
+            styles::inactive_text()
+        };
+
+        let duration_style = if app.active_panel == 0 {
+            if Some(original_index) == app.files_list_state.selected() {
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+            } else if entry.selected {
+                selected_file()
+            } else if entry.is_dir {
+                folder()
+            } else {
+                normal_file()
+            }
+        } else {
+            styles::inactive_text()
+        };
+        // Создаем Rect для текущей строки
+        let line_rect = Rect::new(files_area.x, files_area.y + y as u16, files_area.width, 1);
+
+        // Разделяем строку на левую и правую части
+        let line_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),    // Левая часть - имя файла
+                Constraint::Length(7), // Правая часть - длительность
+            ])
+            .split(line_rect);
+
+        // Левая часть - имя файла
+        let name_text = format!("{}{}{}", selection_indicator, icon, entry.name);
+        let name_paragraph =
+            Paragraph::new(Line::from(Span::styled(name_text, style))).style(surface());
+        frame.render_widget(name_paragraph, line_chunks[0]);
+
+        // Правая часть - длительность (выровнена по правому краю)
+        if !entry.is_dir {
+            let duration_paragraph =
+                Paragraph::new(Line::from(Span::styled(duration_text, duration_style)))
+                    .style(surface())
+                    .alignment(ratatui::layout::Alignment::Right);
+            frame.render_widget(duration_paragraph, line_chunks[1]);
+        }
+
+        y += 1;
     }
-} else {
-    styles::inactive_text()
-};
-    // Создаем Rect для текущей строки
-    let line_rect = Rect::new(
-        files_area.x,
-        files_area.y + y as u16,
-        files_area.width,
-        1,
-    );
 
-    // Разделяем строку на левую и правую части
-    let line_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0), // Левая часть - имя файла
-            Constraint::Length(7), // Правая часть - длительность
-        ])
-        .split(line_rect);
-
-    // Левая часть - имя файла
-    let name_text = format!("{}{}{}", selection_indicator, icon, entry.name);
-    let name_paragraph = Paragraph::new(Line::from(Span::styled(name_text, style)))
-        .style(surface());
-    frame.render_widget(name_paragraph, line_chunks[0]);
-
-    // Правая часть - длительность (выровнена по правому краю)
-    if !entry.is_dir {
-        let duration_paragraph = Paragraph::new(Line::from(Span::styled(duration_text, duration_style)))
-            .style(surface())
-            .alignment(ratatui::layout::Alignment::Right);
-        frame.render_widget(duration_paragraph, line_chunks[1]);
-    }
-
-    y += 1;
-}
-
-// Подсветка выбранного элемента (только если он видим)
-if let Some(selected) = app.files_list_state.selected() {
-    if selected >= files_scroll_offset && (selected - files_scroll_offset) < files_area.height as usize {
-        let highlight_y = (selected - files_scroll_offset) as u16;
-        let highlight_rect = Rect::new(
-            files_area.x,
-            files_area.y + highlight_y,
-            files_area.width,
-            1,
-        );
-        let highlight = Paragraph::new("")
-            .style(if app.active_panel == 0 {
+    // Подсветка выбранного элемента (только если он видим)
+    if let Some(selected) = app.files_list_state.selected() {
+        if selected >= files_scroll_offset
+            && (selected - files_scroll_offset) < files_area.height as usize
+        {
+            let highlight_y = (selected - files_scroll_offset) as u16;
+            let highlight_rect = Rect::new(
+                files_area.x,
+                files_area.y + highlight_y,
+                files_area.width,
+                1,
+            );
+            let highlight = Paragraph::new("").style(if app.active_panel == 0 {
                 styles::highlight_active()
             } else {
                 styles::highlight_inactive()
             });
-        frame.render_widget(highlight, highlight_rect);
+            frame.render_widget(highlight, highlight_rect);
+        }
     }
-}
     // Плейлист - аналогично разделяем на заголовок, пустую строку и контент
     let playlist_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // Заголовок
-            Constraint::Length(1),  // Пустая строка (разделитель)
-            Constraint::Min(1),     // Список плейлиста
+            Constraint::Length(1), // Заголовок
+            Constraint::Length(1), // Пустая строка (разделитель)
+            Constraint::Min(1),    // Список плейлиста
         ])
         .split(columns[1]);
 
@@ -1029,9 +1022,10 @@ if let Some(selected) = app.files_list_state.selected() {
     } else {
         styles::inactive_panel()
     };
-    
-    let playlist_title = Paragraph::new(Line::from(Span::styled(" ПЛЕЙЛИСТ ", playlist_title_style)))
-        .style(styles::surface());
+
+    let playlist_title =
+        Paragraph::new(Line::from(Span::styled(" ПЛЕЙЛИСТ ", playlist_title_style)))
+            .style(styles::surface());
     frame.render_widget(playlist_title, playlist_chunks[0]);
 
     // Рендерим пустую строку-разделитель для плейлиста
@@ -1043,7 +1037,7 @@ if let Some(selected) = app.files_list_state.selected() {
     // Рендерим плейлист вручную для контроля выравнивания
     let playlist_area = playlist_chunks[2];
     let mut y = 0;
-    
+
     // Вычисляем смещение для скроллинга
     let playlist_scroll_offset = if let Some(selected) = app.playlist_list_state.selected() {
         let visible_items = playlist_area.height as usize;
@@ -1055,24 +1049,26 @@ if let Some(selected) = app.files_list_state.selected() {
     } else {
         0
     };
-    
+
     // Рендерим только видимые элементы
     for (i, entry) in app.playlist.iter().enumerate().skip(playlist_scroll_offset) {
         if y >= playlist_area.height as usize {
             break;
         }
-    
+
         let icon = if entry.playing { "▶ " } else { " " };
         let selection_indicator = "  ";
-        
+
         let duration_text = format_duration(entry.duration);
-        
+
         // Вычисляем оригинальный индекс для подсветки
         let original_index = i;
-        
+
         let style = if app.active_panel == 1 {
             if Some(original_index) == app.playlist_list_state.selected() {
-                Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
             } else if entry.playing {
                 styles::playing_track()
             } else {
@@ -1081,23 +1077,23 @@ if let Some(selected) = app.files_list_state.selected() {
         } else {
             styles::inactive_text()
         };
-    
-        // В цикле рендеринга плейлиста замените стиль для длительности:
-            
-            let duration_style = if app.active_panel == 1 {
-                if Some(original_index) == app.playlist_list_state.selected() {
-                    Style::default().fg(theme::TEXT_PRIMARY).add_modifier(Modifier::BOLD)
-                } else if entry.playing {
-                    styles::playing_track()
-                } else {
-                    styles::normal_file()
-                }
-            } else {
-                styles::inactive_text()
-            };
-            
 
-    
+        // В цикле рендеринга плейлиста замените стиль для длительности:
+
+        let duration_style = if app.active_panel == 1 {
+            if Some(original_index) == app.playlist_list_state.selected() {
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+            } else if entry.playing {
+                styles::playing_track()
+            } else {
+                styles::normal_file()
+            }
+        } else {
+            styles::inactive_text()
+        };
+
         // Создаем Rect для текущей строки
         let line_rect = Rect::new(
             playlist_area.x,
@@ -1105,34 +1101,37 @@ if let Some(selected) = app.files_list_state.selected() {
             playlist_area.width,
             1,
         );
-    
+
         // Разделяем строку на левую и правую части
         let line_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Min(0), // Левая часть - имя трека
+                Constraint::Min(0),    // Левая часть - имя трека
                 Constraint::Length(7), // Правая часть - длительность
             ])
             .split(line_rect);
-    
+
         // Левая часть - имя трека
         let name_text = format!("{}{}{}", selection_indicator, icon, entry.name);
-        let name_paragraph = Paragraph::new(Line::from(Span::styled(name_text, style)))
-            .style(styles::surface());
+        let name_paragraph =
+            Paragraph::new(Line::from(Span::styled(name_text, style))).style(styles::surface());
         frame.render_widget(name_paragraph, line_chunks[0]);
-    
+
         // Правая часть - длительность (выровнена по правому краю)
-        let duration_paragraph = Paragraph::new(Line::from(Span::styled(duration_text, duration_style)))
-            .style(styles::surface())
-            .alignment(ratatui::layout::Alignment::Right);
+        let duration_paragraph =
+            Paragraph::new(Line::from(Span::styled(duration_text, duration_style)))
+                .style(styles::surface())
+                .alignment(ratatui::layout::Alignment::Right);
         frame.render_widget(duration_paragraph, line_chunks[1]);
-    
+
         y += 1;
     }
-    
+
     // Подсветка выбранного элемента в плейлисте (только если он видим)
     if let Some(selected) = app.playlist_list_state.selected() {
-        if selected >= playlist_scroll_offset && (selected - playlist_scroll_offset) < playlist_area.height as usize {
+        if selected >= playlist_scroll_offset
+            && (selected - playlist_scroll_offset) < playlist_area.height as usize
+        {
             let highlight_y = (selected - playlist_scroll_offset) as u16;
             let highlight_rect = Rect::new(
                 playlist_area.x,
@@ -1140,16 +1139,15 @@ if let Some(selected) = app.files_list_state.selected() {
                 playlist_area.width,
                 1,
             );
-            let highlight = Paragraph::new("")
-                .style(if app.active_panel == 1 {
-                    styles::highlight_active()
-                } else {
-                    styles::highlight_inactive()
-                });
+            let highlight = Paragraph::new("").style(if app.active_panel == 1 {
+                styles::highlight_active()
+            } else {
+                styles::highlight_inactive()
+            });
             frame.render_widget(highlight, highlight_rect);
         }
     }
-    
+
     // Подсветка выбранного элемента в плейлисте
     if let Some(selected) = app.playlist_list_state.selected() {
         if selected < app.playlist.len() && (selected as u16) < playlist_area.height {
@@ -1159,12 +1157,11 @@ if let Some(selected) = app.files_list_state.selected() {
                 playlist_area.width,
                 1,
             );
-            let highlight = Paragraph::new("")
-                .style(if app.active_panel == 1 {
-                    styles::highlight_active()
-                } else {
-                    styles::highlight_inactive()
-                });
+            let highlight = Paragraph::new("").style(if app.active_panel == 1 {
+                styles::highlight_active()
+            } else {
+                styles::highlight_inactive()
+            });
             frame.render_widget(highlight, highlight_rect);
         }
     }
@@ -1178,68 +1175,66 @@ if let Some(selected) = app.files_list_state.selected() {
                 files_area.width,
                 1,
             );
-            let highlight = Paragraph::new("")
-                .style(if app.active_panel == 0 {
-                    styles::highlight_active()
-                } else {
-                    styles::highlight_inactive()
-                });
+            let highlight = Paragraph::new("").style(if app.active_panel == 0 {
+                styles::highlight_active()
+            } else {
+                styles::highlight_inactive()
+            });
             frame.render_widget(highlight, highlight_rect);
         }
     }
 
-		// Рендерим разделитель (две пустые строки) между панелями и статусной строкой
-		    let separator = Paragraph::new("").style(background());
-		    frame.render_widget(separator, chunks[1]);
-    
-// Статусная строка внизу
-let status_chunks = Layout::default()
-    .direction(Direction::Horizontal)
-    .constraints([
-        Constraint::Percentage(50),  // Левая часть - управление
-        Constraint::Percentage(50),  // Правая часть - состояние
-    ])
-    .split(chunks[2]);  // chunks[1] - это наша строка статуса
+    // Рендерим разделитель (две пустые строки) между панелями и статусной строкой
+    let separator = Paragraph::new("").style(background());
+    frame.render_widget(separator, chunks[1]);
 
-// Левая часть - подсказки по управлению
-let controls_text = if app.active_panel == 0 {
-    " [F1]Справка   [F2] ▶   [F3] ❚❚   [F4] ◼    [F5] ◄◄   [F6] ►►   [Tab] Панель"
-} else {
-    " [F1]Справка   [F2] ▶   [F3] ❚❚   [F4] ◼  [F5] ◄◄   [F6] ►►   [Tab] Панель   [Del] Удалить"
-};
+    // Статусная строка внизу
+    let status_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50), // Левая часть - управление
+            Constraint::Percentage(50), // Правая часть - состояние
+        ])
+        .split(chunks[2]); // chunks[1] - это наша строка статуса
 
-let controls_paragraph = Paragraph::new(Line::from(Span::styled(
-    controls_text,
-    Style::default()
-        .fg(theme::TEXT_SECONDARY)
-        .add_modifier(Modifier::DIM),
-))).style(styles::surface());
-
-frame.render_widget(controls_paragraph, status_chunks[0]);
-
-// Правая часть - состояние воспроизведения
-let status_text = if let Some(sink) = &app.sink {
-    if sink.is_paused() {
-        format!("⏸ Пауза | 🔊 {:.0}%", sink.volume() * 100.0)
-    } else if app.is_playing {
-        format!("▶ Воспроизведение | 🔊 {:.0}%", sink.volume() * 100.0)
+    // Левая часть - подсказки по управлению
+    let controls_text = if app.active_panel == 0 {
+        " [F1]Справка   [F2] ▶   [F3] ❚❚   [F4] ◼    [F5] ◄◄   [F6] ►►   [Tab] Панель"
     } else {
-        format!("⏹ Остановлено | 🔊 {:.0}%", sink.volume() * 100.0)
-    }
-} else {
-    "⏹ Остановлено | 🔊 100%".to_string()
-};
+        " [F1]Справка   [F2] ▶   [F3] ❚❚   [F4] ◼  [F5] ◄◄   [F6] ►►   [Tab] Панель   [Del] Удалить"
+    };
 
-let status_paragraph = Paragraph::new(Line::from(Span::styled(
-    status_text,
-    Style::default()
-        .fg(theme::TEXT_PRIMARY)
-        .add_modifier(Modifier::BOLD),
-))).style(styles::surface())
-.alignment(ratatui::layout::Alignment::Right);
+    let controls_paragraph = Paragraph::new(Line::from(Span::styled(
+        controls_text,
+        Style::default()
+            .fg(theme::TEXT_SECONDARY)
+            .add_modifier(Modifier::DIM),
+    )))
+    .style(styles::surface());
 
-frame.render_widget(status_paragraph, status_chunks[1]);
+    frame.render_widget(controls_paragraph, status_chunks[0]);
+
+    // Правая часть - состояние воспроизведения
+    let status_text = if let Some(sink) = &app.sink {
+        if sink.is_paused() {
+            format!("⏸ Пауза | 🔊 {:.0}%", sink.volume() * 100.0)
+        } else if app.is_playing {
+            format!("▶ Воспроизведение | 🔊 {:.0}%", sink.volume() * 100.0)
+        } else {
+            format!("⏹ Остановлено | 🔊 {:.0}%", sink.volume() * 100.0)
+        }
+    } else {
+        "⏹ Остановлено | 🔊 100%".to_string()
+    };
+
+    let status_paragraph = Paragraph::new(Line::from(Span::styled(
+        status_text,
+        Style::default()
+            .fg(theme::TEXT_PRIMARY)
+            .add_modifier(Modifier::BOLD),
+    )))
+    .style(styles::surface())
+    .alignment(ratatui::layout::Alignment::Right);
+
+    frame.render_widget(status_paragraph, status_chunks[1]);
 }
-
-
-
