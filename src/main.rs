@@ -1768,7 +1768,7 @@ if let Some(dialog) = &app.save_dialog {
         let dialog_area = centered_rect(70, 60, frame.size());
         let dialog_block = Block::default()
             .style(styles::surface())
-            .borders(ratatui::widgets::Borders::ALL)
+            .borders(ratatui::widgets::Borders::NONE)
             .border_style(styles::active_panel())
             .title(" Save Playlist ");
         frame.render_widget(dialog_block, dialog_area);
@@ -1801,7 +1801,7 @@ if let Some(dialog) = &app.save_dialog {
             if dialog.cursor_position > 0 {
                 spans.push(Span::styled(
                     chars[..dialog.cursor_position].iter().collect::<String>(),
-                    Style::default().fg(theme::TEXT_PRIMARY)
+                    Style::default().fg(theme::SUCCESS)
                 ));
             }
             
@@ -1809,7 +1809,7 @@ if let Some(dialog) = &app.save_dialog {
             if dialog.cursor_position < chars.len() {
                 spans.push(Span::styled(
                     chars[dialog.cursor_position].to_string(),
-                    Style::default().fg(theme::BACKGROUND).bg(theme::TEXT_PRIMARY)
+                    Style::default().fg(theme::BACKGROUND).bg(theme::SUCCESS)
                 ));
                 
                 // Добавляем оставшийся текст
@@ -1833,7 +1833,7 @@ if let Some(dialog) = &app.save_dialog {
         let input = Paragraph::new(input_text)
             .style(styles::surface())
             .block(Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
+                .borders(ratatui::widgets::Borders::NONE)
                 .title(" File name "));
         frame.render_widget(input, input_area);
         
