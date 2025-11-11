@@ -168,6 +168,12 @@ fn format_duration(duration: Option<std::time::Duration>) -> String {
         None => "[--:--]".to_string(),
     }
 }
+fn format_time(duration: std::time::Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{:02}:{:02}", minutes, seconds)
+}
 struct App {
     current_dir: PathBuf,
     files: Vec<FileEntry>,
@@ -180,6 +186,8 @@ struct App {
     current_playlist_index: usize,
     is_playing: bool,
     current_playing_path: Option<PathBuf>,
+    current_playback_position: std::time::Duration,
+    playback_start_time: Option<std::time::Instant>,
 }
 
 impl App {
@@ -233,6 +241,8 @@ impl App {
             current_playlist_index: 0,
             is_playing: false,
             current_playing_path: None,
+            current_playback_position: std::time::Duration::ZERO,
+            playback_start_time: None,
         };
 
         app.load_directory()?;
@@ -282,38 +292,43 @@ impl App {
     }
 
     // F3 - Pause/Unpause
-    fn pause(&mut self) {
-        if let Some(sink) = &self.sink {
-            if sink.is_paused() {
-                // Если уже на паузе - продолжаем
-                sink.play();
-                self.is_playing = true;
-                // println!("▶ Продолжено воспроизведение");
-            } else {
-                // Ставим на паузу
-                sink.pause();
-                self.is_playing = false;
-                // println!("⏸ Пауза");
+    // ОБНОВЛЯЕМ ПРОГРЕСС В pause()
+        fn pause(&mut self) {
+            if let Some(sink) = &self.sink {
+                if sink.is_paused() {
+                    sink.play();
+                    self.is_playing = true;
+                    // ВОССТАНАВЛИВАЕМ ВРЕМЯ ПРИ СНЯТИИ ПАУЗЫ
+                    if self.playback_start_time.is_none() {
+                        self.playback_start_time = Some(std::time::Instant::now() - self.current_playback_position);
+                    }
+                } else {
+                    sink.pause();
+                    self.is_playing = false;
+                    // СОХРАНЯЕМ ПОЗИЦИЮ ПРИ ПАУЗЕ
+                    if let Some(_start_time) = self.playback_start_time {  // ← добавляем _
+                        self.current_playback_position = _start_time.elapsed();
+                        self.playback_start_time = None;
+                    }
+                }
             }
-        } else {
-            // println!("⚠ Нет активного воспроизведения для паузы");
         }
-    }
+    
 
     // F4 - Stop
-    fn stop(&mut self) {
-        if let Some(sink) = &self.sink {
-            sink.stop();
-            // println!("⏹ Остановлено");
-        } else {
-            // println!("⚠ Нет активного воспроизведения для остановки");
+    // ОБНОВЛЯЕМ ПРОГРЕСС В stop()
+        fn stop(&mut self) {
+            if let Some(sink) = &self.sink {
+                sink.stop();
+            }
+            self.sink = None;
+            self._stream = None;
+            self.is_playing = false;
+            self.current_playing_path = None;
+            self.current_playback_position = std::time::Duration::ZERO; // СБРОС
+            self.playback_start_time = None; // СБРОС
+            self.update_playing_status();
         }
-        self.sink = None;
-        self._stream = None;
-        self.is_playing = false;
-        self.current_playing_path = None;
-        self.update_playing_status();
-    }
     // F7 - Перемотка назад на 10 секунд (заглушка)
     fn rewind_backward(&mut self) {
         // println!("⏪ Перемотка назад на 10 сек (реализуется позже)");
@@ -600,6 +615,9 @@ impl App {
             self.is_playing = true;
 
             self.update_playing_status();
+            self.current_playback_position = std::time::Duration::ZERO;
+            self.playback_start_time = Some(std::time::Instant::now());
+            self.update_playing_status();
         }
 
         Ok(())
@@ -611,51 +629,44 @@ impl App {
     }
 
     fn previous_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // println!("⏮️ Предыдущий трек");
-
         if self.current_playlist_index > 0 {
-            // Переходим к предыдущему треку в очереди
             self.current_playlist_index -= 1;
-
-            // Останавливаем текущее воспроизведение
+    
             if let Some(sink) = &self.sink {
                 sink.stop();
             }
-
-            // Определяем список файлов для воспроизведения (упрощенная логика, как в play_next)
+    
             let files_to_play: Vec<PathBuf> = self
                 .playlist
                 .iter()
                 .map(|entry| entry.path.clone())
                 .collect();
-
-            // Воспроизводим предыдущий трек
+    
             if self.current_playlist_index < files_to_play.len() {
                 if let Some(prev_file) = files_to_play.get(self.current_playlist_index) {
-                    // println!("🎵 Предыдущий трек: {}", prev_file.display());
-
-                    // ОБНОВЛЯЕМ ПУТЬ ТЕКУЩЕГО ТРЕКА (исправление проблемы)
                     self.current_playing_path = Some(prev_file.clone());
-
+    
                     let file = File::open(prev_file)?;
                     let source = Decoder::new(BufReader::new(file))?;
-
+    
                     let (stream, stream_handle) = OutputStream::try_default()?;
                     let sink = Sink::try_new(&stream_handle)?;
                     sink.append(source);
                     sink.play();
-
+    
                     self._stream = Some(stream);
                     self.sink = Some(sink);
                     self.is_playing = true;
-
+    
+                    // СБРАСЫВАЕМ И ЗАПУСКАЕМ ПРОГРЕСС ДЛЯ ПРЕДЫДУЩЕГО ТРЕКА
+                    self.current_playback_position = std::time::Duration::ZERO;
+                    self.playback_start_time = Some(std::time::Instant::now());
+    
                     self.update_playing_status();
                 }
             }
-        } else {
-            // println!("🎵 Это первый трек, перемотка невозможна");
         }
-
+    
         Ok(())
     }
 
@@ -680,60 +691,74 @@ impl App {
         if let Some(sink) = &self.sink {
             sink.stop();
         }
-
+    
         self.current_playlist_index += 1;
-
+    
         // Определяем следующий файл для воспроизведения
         let files_to_play: Vec<PathBuf> = self
             .playlist
             .iter()
             .map(|entry| entry.path.clone())
             .collect();
-
+    
         // Проверяем есть ли еще треки
         if self.current_playlist_index >= files_to_play.len() {
             self.is_playing = false;
             self.current_playlist_index = 0;
-            self.current_playing_path = None; // Очищаем путь
+            self.current_playing_path = None;
+            // СБРАСЫВАЕМ ПРОГРЕСС
+            self.current_playback_position = std::time::Duration::ZERO;
+            self.playback_start_time = None;
             self.update_playing_status();
             return Ok(());
         }
-
+    
         // Воспроизводим следующий трек
         if let Some(next_file) = files_to_play.get(self.current_playlist_index) {
-            // ОБНОВЛЯЕМ ПУТЬ ТЕКУЩЕГО ТРЕКА
             self.current_playing_path = Some(next_file.clone());
-
+    
             let file = File::open(next_file)?;
             let source = Decoder::new(BufReader::new(file))?;
-
+    
             let (stream, stream_handle) = OutputStream::try_default()?;
             let sink = Sink::try_new(&stream_handle)?;
             sink.append(source);
             sink.play();
-
+    
             self._stream = Some(stream);
             self.sink = Some(sink);
             self.is_playing = true;
-
+    
+            // СБРАСЫВАЕМ И ЗАПУСКАЕМ ПРОГРЕСС ДЛЯ НОВОГО ТРЕКА
+            self.current_playback_position = std::time::Duration::ZERO;
+            self.playback_start_time = Some(std::time::Instant::now());
+    
             self.update_playing_status();
         }
-
+    
         Ok(())
     }
 
-    fn check_playback_finished(&mut self) {
-        if let Some(sink) = &self.sink {
-            if sink.empty() && self.is_playing {
-                // println!("🎵 Трек завершен, переходим к следующему");
-                if let Err(e) = self.play_next() {
-                    eprintln!("Ошибка воспроизведения следующего трека: {}", e);
-                    self.is_playing = false;
-                    self.update_playing_status();
+    fn update_playback_progress(&mut self) {
+            if let (Some(start_time), true) = (self.playback_start_time, self.is_playing) {
+                self.current_playback_position = start_time.elapsed();
+            }
+        }
+    
+        fn check_playback_finished(&mut self) {
+            if let Some(sink) = &self.sink {
+                if sink.empty() && self.is_playing {
+                    // СБРАСЫВАЕМ ПРОГРЕСС ПРИ ЗАВЕРШЕНИИ
+                    self.current_playback_position = std::time::Duration::ZERO;
+                    self.playback_start_time = None;
+                    
+                    if let Err(_e) = self.play_next() {  // ← добавляем _
+                        self.is_playing = false;
+                        self.update_playing_status();
+                    }
                 }
             }
         }
-    }
 }
 
 fn is_audio_file(path: &Path) -> bool {
@@ -763,6 +788,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Главный цикл
     'main: loop {
+    	// ОБНОВЛЯЕМ ПРОГРЕСС ВОСПРОИЗВЕДЕНИЯ
+    	app.update_playback_progress();
         // Проверяем окончание воспроизведения
         app.check_playback_finished();
 
@@ -770,7 +797,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|f| ui(f, &app))?;
 
         // Обрабатываем ввод
-        if event::poll(Duration::from_millis(50))? {
+        if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     // В main loop, в match key.code { ... }:
@@ -1229,16 +1256,54 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     frame.render_widget(controls_paragraph, status_chunks[0]);
 
     // Правая часть - состояние воспроизведения
+    // В функции ui(), заменяем текущую status_text на:
+    
+    // Получаем общую длительность текущего трека
+    let total_duration = if let Some(current_path) = &app.current_playing_path {
+        get_audio_duration(current_path)
+    } else {
+        None
+    };
+    
+    // Создаем прогресс-бар
+    // В функции ui(), в части прогресс-бара:
+    let progress_text = if let (Some(total), Some(current)) = (total_duration, Some(app.current_playback_position)) {
+        let progress_ratio = if total.as_secs() > 0 {
+            current.as_secs_f64() / total.as_secs_f64()
+        } else {
+            0.0
+        };
+        
+        // Ограничиваем прогресс 100%
+        let progress_ratio = progress_ratio.min(1.0);
+        
+        // Создаем визуальный прогресс-бар (20 символов)
+        let bar_width = 20;
+        let filled = (progress_ratio * bar_width as f64).round() as usize;
+        let empty = bar_width - filled;
+        
+        format!(  // ← ДОБАВЛЯЕМ format! здесь
+            "{}{} {}/{}",
+            "●".repeat(filled),
+            "◦".repeat(empty),
+            format_time(current),
+            format_time(total)
+        )
+    } else {
+        "◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦ --:--/--:--".to_string()
+    };
+    
+    // Объединяем с информацией о состоянии
     let status_text = if let Some(sink) = &app.sink {
         if sink.is_paused() {
-            format!("⏸ Пауза | 🔊 {:.0}%", sink.volume() * 100.0)
+            format!("⏸ {} | 🔊 {:.0}%", progress_text, sink.volume() * 100.0)
         } else if app.is_playing {
-            format!("▶ Воспроизведение | 🔊 {:.0}%", sink.volume() * 100.0)
+            format!("▶ {} | 🔊 {:.0}%", progress_text, sink.volume() * 100.0)
         } else {
-            format!("⏹ Остановлено | 🔊 {:.0}%", sink.volume() * 100.0)
+            format!("⏹ {} | 🔊 {:.0}%", progress_text, sink.volume() * 100.0)
         }
     } else {
-        "⏹ Остановлено | 🔊 100%".to_string()
+        format!("⏹ {} | 🔊 100%", progress_text)
     };
 
     let status_paragraph = Paragraph::new(Line::from(Span::styled(
