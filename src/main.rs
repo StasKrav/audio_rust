@@ -22,6 +22,8 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use libc;
+
 // -------- цвета -------
 // Цветовая палитра приложения
 mod theme {
@@ -141,6 +143,17 @@ fn get_audio_duration(path: &Path) -> Option<std::time::Duration> {
             }
         }
         Err(_) => None,
+    }
+}
+fn suppress_alsa_warnings() {
+    unsafe {
+        // Открываем /dev/null
+        let null_fd = libc::open("/dev/null\0".as_ptr() as *const i8, libc::O_WRONLY);
+        if null_fd >= 0 {
+            // Перенаправляем stderr в /dev/null
+            libc::dup2(null_fd, 2); // 2 = stderr
+            libc::close(null_fd);
+        }
     }
 }
 
@@ -732,9 +745,10 @@ fn is_audio_file(path: &Path) -> bool {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+	suppress_alsa_warnings();
     // Увеличиваем размер аудиобуфера для предотвращения underrun
-    env::set_var("RUST_AUDIO_BACKEND_BUFFER_SIZE", "512");
-    env::set_var("RUST_AUDIO_LATENCY", "0.1");
+    env::set_var("RUST_AUDIO_BACKEND_BUFFER_SIZE", "8192");
+    env::set_var("RUST_AUDIO_LATENCY", "1");
     let cli = Cli::parse();
 
     // Создаем приложение
