@@ -188,8 +188,14 @@ struct App {
     current_playing_path: Option<PathBuf>,
     current_playback_position: std::time::Duration,
     playback_start_time: Option<std::time::Instant>,
+    save_dialog: Option<SaveDialog>,
 }
-
+#[derive(Default)]
+struct SaveDialog {
+    visible: bool,
+    filename: String,
+    cursor_position: usize, // ВОЗВРАЩАЕМ курсор
+}
 impl App {
     fn new(start_dir: Option<String>) -> Result<Self, Box<dyn std::error::Error>> {
         let (current_dir, initial_file) = if let Some(dir) = start_dir {
@@ -243,6 +249,7 @@ impl App {
             current_playing_path: None,
             current_playback_position: std::time::Duration::ZERO,
             playback_start_time: None,
+            save_dialog: None, 
         };
 
         app.load_directory()?;
@@ -272,7 +279,86 @@ impl App {
         // TODO: реализовать модальное окно со справкой
         println!("📖 Справка будет реализована в модальном окне");
     }
-
+	// F9 - Сохранить плейлист
+	fn show_save_dialog(&mut self) {
+	        self.save_dialog = Some(SaveDialog {
+	            visible: true,
+	            filename: "playlist.m3u".to_string(),
+	            cursor_position: 11, // Позиция после ".m3u"
+	        });
+	    }
+	
+	fn hide_save_dialog(&mut self) {
+	    self.save_dialog = None;
+	}
+	
+	fn save_playlist(&self) -> Result<(), Box<dyn std::error::Error>> {
+	    if let Some(dialog) = &self.save_dialog {
+	        let path = Path::new(&dialog.filename);
+	        
+	        let mut content = String::new();
+	        content.push_str("#EXTM3U\n");
+	        
+	        for entry in &self.playlist {
+	            if let Some(duration) = entry.duration {
+	                let seconds = duration.as_secs();
+	                content.push_str(&format!("#EXTINF:{},{}\n", seconds, entry.name));
+	            } else {
+	                content.push_str(&format!("#EXTINF:-1,{}\n", entry.name));
+	            }
+	            content.push_str(&format!("{}\n", entry.path.display()));
+	        }
+	        
+	        std::fs::write(path, content)?;
+	        // println!("✅ Плейлист сохранен: {}", path.display());
+	    }
+	    Ok(())
+	}
+	
+	// Обработка ввода в диалоге сохранения
+	fn handle_save_dialog_input(&mut self, key: event::KeyEvent) {
+	        if let Some(dialog) = &mut self.save_dialog {
+	            match key.code {
+	                KeyCode::Enter => {
+	                    if let Err(e) = self.save_playlist() {
+	                        eprintln!("Ошибка сохранения: {}", e);
+	                    }
+	                    self.hide_save_dialog();
+	                }
+	                KeyCode::Esc => {
+	                    self.hide_save_dialog();
+	                }
+	                KeyCode::Char(c) => {
+	                    dialog.filename.insert(dialog.cursor_position, c);
+	                    dialog.cursor_position += 1;
+	                }
+	                KeyCode::Backspace => {
+	                    if dialog.cursor_position > 0 {
+	                        dialog.cursor_position -= 1;
+	                        dialog.filename.remove(dialog.cursor_position);
+	                    }
+	                }
+	                KeyCode::Left => {
+	                    if dialog.cursor_position > 0 {
+	                        dialog.cursor_position -= 1;
+	                    }
+	                }
+	                KeyCode::Right => {
+	                    if dialog.cursor_position < dialog.filename.len() {
+	                        dialog.cursor_position += 1;
+	                    }
+	                }
+	                KeyCode::Home => {
+	                    dialog.cursor_position = 0;
+	                }
+	                KeyCode::End => {
+	                    dialog.cursor_position = dialog.filename.len();
+	                }
+	                _ => {}
+	            }
+	        }
+	    }
+	
     // F2 - Play
     fn play(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Если на паузе - продолжаем
@@ -371,8 +457,12 @@ impl App {
                         selected: false,
                         duration: None,
                     });
-                } else if is_audio_file(&path) {
-                    let duration = get_audio_duration(&path);
+                } else if is_audio_file(&path) || path.extension().map_or(false, |ext| ext == "m3u") {
+                    let duration = if path.extension().map_or(false, |ext| ext == "m3u") {
+                        None // У m3u файлов нет длительности
+                    } else {
+                        get_audio_duration(&path)
+                    };
                     audio_files.push(FileEntry {
                         path: path.clone(),
                         is_dir: false,
@@ -762,13 +852,32 @@ impl App {
 }
 
 fn is_audio_file(path: &Path) -> bool {
-    let audio_extensions = ["wav", "flac", "mp3", "ogg", "m4a", "aac", "dsf", "dff"];
+    let audio_extensions = ["wav", "flac", "mp3", "ogg", "m4a", "aac", "dsf", "dff", "m3u"];
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| audio_extensions.contains(&ext.to_lowercase().as_str()))
         .unwrap_or(false)
 }
+// Добавляем функцию центрирования ПОСЛЕ функции ui
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
 
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 	suppress_alsa_warnings();
     // Увеличиваем размер аудиобуфера для предотвращения underrun
@@ -796,7 +905,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Отрисовываем интерфейс
         terminal.draw(|f| ui(f, &app))?;
 
-        // Обрабатываем ввод
+          // ★★★ ОБРАБОТКА ДИАЛОГА ★★★
+    if let Some(dialog) = &app.save_dialog {
+        if dialog.visible {
+            // Блокирующее чтение для диалога
+            match event::read()? {
+                Event::Key(key) => {
+                    app.handle_save_dialog_input(key);
+                }
+                _ => {}
+            }
+            continue;
+        }
+    }
+        
+             // Обрабатываем ввод
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
@@ -827,6 +950,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::F(8) => app.rewind_forward(),
                     KeyCode::Char('q') | KeyCode::Esc => break 'main,
                     KeyCode::Tab => app.switch_panel(),
+                    KeyCode::F(9) => {
+                        if app.save_dialog.is_none() {
+                            app.show_save_dialog();
+                        } else {
+                            app.hide_save_dialog();
+                        }
+                    }
 
                     // Громкость
                     KeyCode::Char('+') => {
@@ -913,7 +1043,9 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
             Constraint::Min(1),    // Список файлов
         ])
         .split(columns[0]);
-
+	// Рендерим диалог сохранения поверх основного интерфейса
+	// Рендерим диалог сохранения поверх основного интерфейса
+	
     // Рендерим заголовок файлового менеджера
     let files_title_style = if app.active_panel == 0 {
         active_panel()
@@ -1233,27 +1365,45 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     let status_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(50), // Левая часть - управление
-            Constraint::Percentage(50), // Правая часть - состояние
+            Constraint::Percentage(50), // Левая часть - текущий трек + управление плейлистом
+            Constraint::Percentage(50), // Правая часть - состояние воспроизведения
         ])
-        .split(chunks[2]); // chunks[1] - это наша строка статуса
+        .split(chunks[2]);
 
-    // Левая часть - подсказки по управлению
-    let controls_text = if app.active_panel == 0 {
-        " [F1]Справка   [F2] ▶   [F3] ❚❚   [F4] ◼    [F5] ◄◄   [F6] ►►   [Tab] Панель"
+   // Левая часть - текущий трек и управление плейлистом
+    let left_status_text = if let Some(current_path) = &app.current_playing_path {
+        if let Some(file_name) = current_path.file_name().and_then(|n| n.to_str()) {
+            // Обрезаем длинные названия
+            let display_name = if file_name.len() > 30 {
+                format!("{}...", &file_name[..27])
+            } else {
+                file_name.to_string()
+            };
+            format!(" Now: {} ", display_name)
+        } else {
+            " No track ".to_string()
+        }
     } else {
-        " [F1]Справка   [F2] ▶   [F3] ❚❚   [F4] ◼  [F5] ◄◄   [F6] ►►   [Tab] Панель   [Del] Удалить"
+        " No track ".to_string()
     };
-
-    let controls_paragraph = Paragraph::new(Line::from(Span::styled(
-        controls_text,
-        Style::default()
-            .fg(theme::TEXT_SECONDARY)
-            .add_modifier(Modifier::DIM),
-    )))
+    
+    let left_status_paragraph = Paragraph::new(Line::from(vec![
+        Span::styled(
+            &left_status_text,
+            Style::default()
+                .fg(theme::TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " [F9]Save ",
+            Style::default()
+                .fg(theme::TEXT_SECONDARY)
+                .add_modifier(Modifier::DIM),
+        ),
+    ]))
     .style(styles::surface());
-
-    frame.render_widget(controls_paragraph, status_chunks[0]);
+    
+    frame.render_widget(left_status_paragraph, status_chunks[0]);
 
     // Правая часть - состояние воспроизведения
     // В функции ui(), заменяем текущую status_text на:
@@ -1318,4 +1468,58 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         .alignment(ratatui::layout::Alignment::Right);
 
     frame.render_widget(status_paragraph, status_chunks[1]);
+if let Some(dialog) = &app.save_dialog {
+	    if dialog.visible {
+	        // Создаем overlay на весь экран
+	        let overlay = Rect::new(0, 0, frame.size().width, frame.size().height);
+	        let block = Block::default()
+	            .style(Style::default().bg(theme::BACKGROUND));
+	        frame.render_widget(block, overlay);
+	        
+	        let dialog_area = centered_rect(50, 20, frame.size());
+	        
+	        // Фон диалога
+	        let block = Block::default()
+	            .style(styles::surface())
+	            .borders(ratatui::widgets::Borders::ALL)
+	            .border_style(styles::active_panel())
+	            .title(" Save Playlist ");
+	        frame.render_widget(block, dialog_area);
+	        
+	        let inner_chunks = Layout::default()
+	            .direction(Direction::Vertical)
+	            .margin(1)
+	            .constraints([
+	                Constraint::Length(1),
+	                Constraint::Length(3),
+	                Constraint::Length(1),
+	            ])
+	            .split(dialog_area);
+	        
+	        // Текст
+	        let text = Paragraph::new("File name:");
+	        frame.render_widget(text, inner_chunks[0]);
+	        
+	        // Поле ввода с курсором
+	        let input_text = if dialog.cursor_position <= dialog.filename.len() {
+	            let (left, right) = dialog.filename.split_at(dialog.cursor_position);
+	            format!("{}|{}", left, right) // Курсор в виде вертикальной черты
+	        } else {
+	            format!("{}|", dialog.filename)
+	        };
+	        
+	        let input = Paragraph::new(input_text)
+	            .style(Style::default().fg(theme::TEXT_PRIMARY))
+	            .block(Block::default().borders(ratatui::widgets::Borders::ALL));
+	        frame.render_widget(input, inner_chunks[1]);
+	        
+	        // Подсказка
+	        let hint = Paragraph::new(Line::from(Span::styled(
+	            " Enter: Save  Esc: Cancel ",
+	            Style::default().fg(theme::TEXT_SECONDARY),
+	        )));
+	        frame.render_widget(hint, inner_chunks[2]);
+	    }
+	}
 }
+
