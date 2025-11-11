@@ -1259,6 +1259,9 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     // В функции ui(), заменяем текущую status_text на:
     
     // Получаем общую длительность текущего трека
+    // В функции ui(), заменяем весь блок прогресс-бара на:
+    
+    // Получаем общую длительность текущего трека
     let total_duration = if let Some(current_path) = &app.current_playing_path {
         get_audio_duration(current_path)
     } else {
@@ -1266,54 +1269,53 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     };
     
     // Создаем прогресс-бар
-    // В функции ui(), в части прогресс-бара:
-    let progress_text = if let (Some(total), Some(current)) = (total_duration, Some(app.current_playback_position)) {
+    let (filled, empty, current_time, total_time) = if let (Some(total), Some(current)) = (total_duration, Some(app.current_playback_position)) {
         let progress_ratio = if total.as_secs() > 0 {
             current.as_secs_f64() / total.as_secs_f64()
         } else {
             0.0
         };
         
-        // Ограничиваем прогресс 100%
         let progress_ratio = progress_ratio.min(1.0);
-        
-        // Создаем визуальный прогресс-бар (20 символов)
         let bar_width = 20;
         let filled = (progress_ratio * bar_width as f64).round() as usize;
         let empty = bar_width - filled;
         
-        format!(  // ← ДОБАВЛЯЕМ format! здесь
-            "{}{} {}/{}",
-            "●".repeat(filled),
-            "◦".repeat(empty),
-            format_time(current),
-            format_time(total)
-        )
+        (filled, empty, format_time(current), format_time(total))
     } else {
-        "◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦◦ --:--/--:--".to_string()
+        (0, 20, "--:--".to_string(), "--:--".to_string())
     };
     
     // Объединяем с информацией о состоянии
-    let status_text = if let Some(sink) = &app.sink {
+    let status_icon = if let Some(sink) = &app.sink {
         if sink.is_paused() {
-            format!("⏸ {} | 🔊 {:.0}%", progress_text, sink.volume() * 100.0)
+            "⏸ "
         } else if app.is_playing {
-            format!("▶ {} | 🔊 {:.0}%", progress_text, sink.volume() * 100.0)
+            "▶ "
         } else {
-            format!("⏹ {} | 🔊 {:.0}%", progress_text, sink.volume() * 100.0)
+            "⏹ "
         }
     } else {
-        format!("⏹ {} | 🔊 100%", progress_text)
+        "⏹ "
     };
-
-    let status_paragraph = Paragraph::new(Line::from(Span::styled(
-        status_text,
-        Style::default()
-            .fg(theme::TEXT_PRIMARY)
-            .add_modifier(Modifier::BOLD),
-    )))
-    .style(styles::surface())
-    .alignment(ratatui::layout::Alignment::Right);
+    
+    let volume_text = if let Some(sink) = &app.sink {
+        format!("{:.0}%", sink.volume() * 100.0)
+    } else {
+        "100%".to_string()
+    };
+    
+    // Создаем цветной прогресс-бар с Spans
+    let status_line = Line::from(vec![
+        Span::raw(status_icon),
+        Span::styled("●".repeat(filled), Style::default().fg(theme::SUCCESS)),  // ЗАПОЛНЕННЫЕ - цветные
+        Span::styled("◦".repeat(empty), Style::default().fg(theme::TEXT_DISABLED)),  // ПУСТЫЕ - серые
+        Span::raw(format!(" {}/{} | 🔊 {}", current_time, total_time, volume_text)),
+    ]);
+    
+    let status_paragraph = Paragraph::new(status_line)
+        .style(styles::surface())
+        .alignment(ratatui::layout::Alignment::Right);
 
     frame.render_widget(status_paragraph, status_chunks[1]);
 }
