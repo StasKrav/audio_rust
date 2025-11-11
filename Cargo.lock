@@ -430,6 +430,7 @@ dependencies = [
  "clap",
  "console",
  "crossterm",
+ "libc",
  "ratatui",
  "rodio",
 ]
