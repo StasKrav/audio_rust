@@ -687,8 +687,10 @@ impl App {
                             self.playlist.push(m3u_entry);
                         }
                     } else {
-                        // Обычный файл - перемещение выделенных файлов в плейлист
-                        self.move_selected_to_playlist();
+                        // Перемещение выделенных файлов в плейлист
+                        if let Err(e) = self.move_selected_to_playlist() {
+                            eprintln!("Ошибка при добавлении в плейлист: {}", e);
+                        }
                     }
                 }
             }
