@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, ListState, Paragraph},
+    widgets::{Block, ListState, Paragraph, Clear },
     Terminal,
 };
 use rodio::{Decoder, OutputStream, Sink};
@@ -196,6 +196,84 @@ struct SaveDialog {
     filename: String,
     cursor_position: usize, // ВОЗВРАЩАЕМ курсор
 }
+
+fn parse_m3u_file(path: &Path) -> Result<Vec<PlaylistEntry>, Box<dyn std::error::Error>> {
+    let content = fs::read_to_string(path)?;
+    let mut entries = Vec::new();
+    let mut current_extinf: Option<String> = None;
+    let base_dir = path.parent().unwrap_or(Path::new("."));
+
+    for line in content.lines() {
+        let line = line.trim();
+        
+        if line.is_empty() {
+            continue;
+        }
+        
+        if line.starts_with("#EXTM3U") {
+            continue; // Пропускаем заголовок
+        }
+        
+        if line.starts_with("#EXTINF:") {
+            current_extinf = Some(line.to_string());
+            continue;
+        }
+        
+        // Это строка с путем к файлу
+        if !line.starts_with("#") {
+            let file_path = if Path::new(line).is_absolute() {
+                PathBuf::from(line)
+            } else {
+                base_dir.join(line)
+            };
+            
+            if file_path.exists() {
+                let name = if let Some(extinf) = &current_extinf {
+                    // Парсим название из #EXTINF
+                    if let Some(comma_pos) = extinf.rfind(',') {
+                        extinf[comma_pos + 1..].to_string()
+                    } else {
+                        file_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Unknown")
+                            .to_string()
+                    }
+                } else {
+                    file_path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string()
+                };
+                
+                let duration = if file_path.extension().map_or(false, |ext| is_audio_extension(ext)) {
+                    get_audio_duration(&file_path)
+                } else {
+                    None
+                };
+                
+                entries.push(PlaylistEntry {
+                    path: file_path,
+                    name,
+                    playing: false,
+                    duration,
+                });
+            }
+            
+            current_extinf = None;
+        }
+    }
+    
+    Ok(entries)
+}
+
+// Вспомогательная функция для проверки аудио расширений
+fn is_audio_extension(ext: &std::ffi::OsStr) -> bool {
+    let audio_extensions = ["wav", "flac", "mp3", "ogg", "m4a", "aac", "dsf", "dff"];
+    ext.to_str()
+        .map(|ext| audio_extensions.contains(&ext.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 impl App {
     fn new(start_dir: Option<String>) -> Result<Self, Box<dyn std::error::Error>> {
         let (current_dir, initial_file) = if let Some(dir) = start_dir {
@@ -559,7 +637,7 @@ impl App {
         }
     }
 
-    fn move_selected_to_playlist(&mut self) {
+    fn move_selected_to_playlist(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.active_panel == 0 {
             let selected_files: Vec<FileEntry> = self
                 .files
@@ -567,21 +645,31 @@ impl App {
                 .filter(|entry| entry.selected && !entry.is_dir)
                 .cloned()
                 .collect();
-
+    
             for file in selected_files {
-                self.playlist.push(PlaylistEntry {
-                    path: file.path.clone(),
-                    name: file.name.clone(),
-                    playing: false,
-                    duration: file.duration, // Копируем длительность
-                });
+                if file.path.extension().map_or(false, |ext| ext == "m3u") {
+                    // Если это M3U файл - парсим его
+                    let m3u_entries = parse_m3u_file(&file.path)?;
+                    for m3u_entry in m3u_entries {
+                        self.playlist.push(m3u_entry);
+                    }
+                } else {
+                    // Обычный аудиофайл
+                    self.playlist.push(PlaylistEntry {
+                        path: file.path.clone(),
+                        name: file.name.clone(),
+                        playing: false,
+                        duration: file.duration,
+                    });
+                }
             }
-
+    
             // Снимаем выделение после перемещения
             for entry in &mut self.files {
                 entry.selected = false;
             }
         }
+        Ok(())
     }
 
     fn handle_right_key(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -592,8 +680,14 @@ impl App {
                         // Вход в папку
                         self.current_dir = entry.path.clone();
                         self.load_directory()?;
+                    } else if entry.path.extension().map_or(false, |ext| ext == "m3u") {
+                        // Если это M3U файл - добавляем все треки из плейлиста
+                        let m3u_entries = parse_m3u_file(&entry.path)?;
+                        for m3u_entry in m3u_entries {
+                            self.playlist.push(m3u_entry);
+                        }
                     } else {
-                        // Перемещение выделенных файлов в плейлист
+                        // Обычный файл - перемещение выделенных файлов в плейлист
                         self.move_selected_to_playlist();
                     }
                 }
@@ -602,21 +696,31 @@ impl App {
         Ok(())
     }
 
-    fn add_to_playlist(&mut self) {
+    fn add_to_playlist(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.active_panel == 0 {
             if let Some(selected) = self.files_list_state.selected() {
                 if let Some(entry) = self.files.get(selected) {
                     if !entry.is_dir {
-                        self.playlist.push(PlaylistEntry {
-                            path: entry.path.clone(),
-                            name: entry.name.clone(),
-                            playing: false,
-                            duration: entry.duration, // Копируем длительность
-                        });
+                        if entry.path.extension().map_or(false, |ext| ext == "m3u") {
+                            // Если это M3U файл - парсим его
+                            let m3u_entries = parse_m3u_file(&entry.path)?;
+                            for m3u_entry in m3u_entries {
+                                self.playlist.push(m3u_entry);
+                            }
+                        } else {
+                            // Обычный аудиофайл
+                            self.playlist.push(PlaylistEntry {
+                                path: entry.path.clone(),
+                                name: entry.name.clone(),
+                                playing: false,
+                                duration: entry.duration,
+                            });
+                        }
                     }
                 }
             }
         }
+        Ok(())
     }
 
     fn remove_from_playlist(&mut self) {
@@ -995,7 +1099,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // Действия
-                    KeyCode::Enter => app.add_to_playlist(),
+                    KeyCode::Enter => {
+                        if let Err(e) = app.add_to_playlist() {
+                            eprintln!("Ошибка добавления в плейлист: {}", e);
+                        }
+                    }
                     KeyCode::Delete => app.remove_from_playlist(),
 
                     _ => {}
@@ -1469,22 +1577,25 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
 
     frame.render_widget(status_paragraph, status_chunks[1]);
 if let Some(dialog) = &app.save_dialog {
-	    if dialog.visible {
-	        // Создаем overlay на весь экран
-	        let overlay = Rect::new(0, 0, frame.size().width, frame.size().height);
-	        let block = Block::default()
-	            .style(Style::default().bg(theme::BACKGROUND));
-	        frame.render_widget(block, overlay);
-	        
-	        let dialog_area = centered_rect(50, 20, frame.size());
-	        
-	        // Фон диалога
-	        let block = Block::default()
-	            .style(styles::surface())
-	            .borders(ratatui::widgets::Borders::ALL)
-	            .border_style(styles::active_panel())
-	            .title(" Save Playlist ");
-	        frame.render_widget(block, dialog_area);
+    if dialog.visible {
+        let overlay = Rect::new(0, 0, frame.size().width, frame.size().height);
+        
+        // 1. Очищаем область
+        frame.render_widget(Clear, overlay);
+        
+        // 2. Рисуем непрозрачный фон
+        let background = Block::default()
+            .style(Style::default().bg(theme::BACKGROUND));
+        frame.render_widget(background, overlay);
+        
+        // 3. Рисуем диалог
+        let dialog_area = centered_rect(50, 20, frame.size());
+        let dialog_block = Block::default()
+            .style(styles::surface())
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(styles::active_panel())
+            .title(" Save Playlist ");
+        frame.render_widget(dialog_block, dialog_area);
 	        
 	        let inner_chunks = Layout::default()
 	            .direction(Direction::Vertical)
