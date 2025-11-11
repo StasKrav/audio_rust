@@ -145,6 +145,21 @@ fn get_audio_duration(path: &Path) -> Option<std::time::Duration> {
         Err(_) => None,
     }
 }
+
+fn is_valid_filename_char(c: char) -> bool {
+    // Разрешаем кириллицу, латиницу, цифры, точки, дефисы, подчеркивания
+    c.is_alphabetic() || 
+    c.is_numeric() || 
+    c == '.' || 
+    c == '-' || 
+    c == '_' || 
+    c == ' ' ||
+    c == '/' || 
+    c == '\\' ||
+    (c >= 'а' && c <= 'я') ||  // кириллица строчные
+    (c >= 'А' && c <= 'Я')     // кириллица заглавные
+}
+
 fn suppress_alsa_warnings() {
     unsafe {
         // Открываем /dev/null
@@ -433,8 +448,11 @@ impl App {
 	                    self.hide_save_dialog();
 	                }
 	                KeyCode::Char(c) => {
-	                    dialog.filename.insert(dialog.cursor_position, c);
-	                    dialog.cursor_position += 1;
+	                    // Проверяем, что символ допустим для имени файла
+	                    if is_valid_filename_char(c) {
+	                        dialog.filename.insert(dialog.cursor_position, c);
+	                        dialog.cursor_position += 1;
+	                    }
 	                }
 	                KeyCode::Backspace => {
 	                    if dialog.cursor_position > 0 {
@@ -1035,45 +1053,59 @@ impl SaveDialog {
             });
         }
         
-        let entries = fs::read_dir(&self.current_dir)?;
+        let entries = match fs::read_dir(&self.current_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                eprintln!("Ошибка чтения директории {}: {}", self.current_dir.display(), e);
+                return Ok(()); // Возвращаемся без ошибки, чтобы не падать
+            }
+        };
+
         let mut dirs = Vec::new();
         let mut files = Vec::new();
 
         for entry in entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                
-                // Пропускаем скрытые файлы/папки
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue, // Пропускаем проблемные файлы
+            };
+            
+            let path = entry.path();
+            
+            // Безопасное получение имени файла
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(file_name) => {
+                    // Пропускаем скрытые файлы/папки
                     if file_name.starts_with('.') {
                         continue;
                     }
+                    if path.is_dir() {
+                        format!("{}/", file_name)
+                    } else {
+                        file_name.to_string()
+                    }
                 }
+                None => continue, // Пропускаем файлы с некорректными именами
+            };
 
-                let is_dir = path.is_dir();
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| if is_dir { format!("{}/", s) } else { s.to_string() })
-                    .unwrap_or_else(|| "Unknown".to_string());
-
-                if is_dir {
-                    dirs.push(FileEntry {
-                        path: path.clone(),
-                        is_dir: true,
-                        name,
-                        selected: false,
-                        duration: None,
-                    });
-                } else {
-                    files.push(FileEntry {
-                        path: path.clone(),
-                        is_dir: false,
-                        name,
-                        selected: false,
-                        duration: None,
-                    });
-                }
+            let is_dir = path.is_dir();
+            
+            if is_dir {
+                dirs.push(FileEntry {
+                    path: path.clone(),
+                    is_dir: true,
+                    name,
+                    selected: false,
+                    duration: None,
+                });
+            } else {
+                files.push(FileEntry {
+                    path: path.clone(),
+                    is_dir: false,
+                    name,
+                    selected: false,
+                    duration: None,
+                });
             }
         }
 
@@ -1097,7 +1129,13 @@ impl SaveDialog {
             if let Some(entry) = self.files.get(selected) {
                 if entry.is_dir {
                     self.current_dir = entry.path.clone();
-                    self.load_directory()?;
+                    if let Err(e) = self.load_directory() {
+                        eprintln!("Ошибка загрузки директории: {}", e);
+                        // Возвращаемся обратно при ошибке
+                        if let Some(parent) = self.current_dir.parent() {
+                            self.current_dir = parent.to_path_buf();
+                        }
+                    }
                     // Обновляем имя файла с новой директорией
                     if let Some(file_name) = self.current_dir.file_name().and_then(|n| n.to_str()) {
                         self.filename = format!("{}.m3u", file_name);
@@ -1120,7 +1158,7 @@ impl SaveDialog {
             }
         }
     }
-}
+} // <-- Закрывающая фигурная скобка для impl SaveDialog
 fn is_audio_file(path: &Path) -> bool {
     let audio_extensions = ["wav", "flac", "mp3", "ogg", "m4a", "aac", "dsf", "dff", "m3u"];
     path.extension()
@@ -1177,12 +1215,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
           // ★★★ ОБРАБОТКА ДИАЛОГА ★★★
     // В главном цикле, где обрабатывается диалог:
+    // В главном цикле, где обрабатывается диалог:
     if let Some(dialog) = &app.save_dialog {
         if dialog.visible {
             match event::read()? {
                 Event::Key(key) => {
                     if let Err(e) = app.handle_save_dialog_input(key) {
-                        eprintln!("Ошибка в диалоге: {}", e);
+                        eprintln!("Ошибка в диалоге сохранения: {}", e);
+                        // Не закрываем приложение при ошибке, просто логируем
                     }
                 }
                 _ => {}
