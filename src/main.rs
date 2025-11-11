@@ -195,6 +195,9 @@ struct SaveDialog {
     visible: bool,
     filename: String,
     cursor_position: usize, // ВОЗВРАЩАЕМ курсор
+    current_dir: PathBuf,
+    files: Vec<FileEntry>, // Добавляем список файлов для навигации
+    list_state: ListState,
 }
 
 fn parse_m3u_file(path: &Path) -> Result<Vec<PlaylistEntry>, Box<dyn std::error::Error>> {
@@ -358,12 +361,21 @@ impl App {
         println!("📖 Справка будет реализована в модальном окне");
     }
 	// F9 - Сохранить плейлист
-	fn show_save_dialog(&mut self) {
-	        self.save_dialog = Some(SaveDialog {
+	fn show_save_dialog(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+	        let current_dir = std::env::current_dir().unwrap_or_default();
+	        let mut dialog = SaveDialog {
 	            visible: true,
 	            filename: "playlist.m3u".to_string(),
-	            cursor_position: 11, // Позиция после ".m3u"
-	        });
+	            cursor_position: 11,
+	            current_dir: current_dir.clone(),
+	            files: Vec::new(),
+	            list_state: ListState::default(),
+	        };
+	        
+	        // Загружаем файлы текущей директории
+	        dialog.load_directory()?;
+	        self.save_dialog = Some(dialog);
+	        Ok(())
 	    }
 	
 	fn hide_save_dialog(&mut self) {
@@ -372,7 +384,21 @@ impl App {
 	
 	fn save_playlist(&self) -> Result<(), Box<dyn std::error::Error>> {
 	    if let Some(dialog) = &self.save_dialog {
-	        let path = Path::new(&dialog.filename);
+	        // Используем текущую директорию диалога как базовую
+	        let path = if dialog.filename.starts_with('/') || 
+	                     dialog.filename.starts_with('\\') || 
+	                     (dialog.filename.len() > 2 && dialog.filename.chars().nth(1) == Some(':')) {
+	            // Абсолютный путь - используем как есть
+	            PathBuf::from(&dialog.filename)
+	        } else {
+	            // Относительный путь - относительно текущей директории диалога
+	            dialog.current_dir.join(&dialog.filename)
+	        };
+	        
+	        // Создаем директорию если нужно
+	        if let Some(parent) = path.parent() {
+	            std::fs::create_dir_all(parent)?;
+	        }
 	        
 	        let mut content = String::new();
 	        content.push_str("#EXTM3U\n");
@@ -387,14 +413,14 @@ impl App {
 	            content.push_str(&format!("{}\n", entry.path.display()));
 	        }
 	        
-	        std::fs::write(path, content)?;
+	        std::fs::write(&path, content)?;
 	        // println!("✅ Плейлист сохранен: {}", path.display());
 	    }
 	    Ok(())
 	}
 	
 	// Обработка ввода в диалоге сохранения
-	fn handle_save_dialog_input(&mut self, key: event::KeyEvent) {
+	fn handle_save_dialog_input(&mut self, key: event::KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
 	        if let Some(dialog) = &mut self.save_dialog {
 	            match key.code {
 	                KeyCode::Enter => {
@@ -417,13 +443,28 @@ impl App {
 	                    }
 	                }
 	                KeyCode::Left => {
-	                    if dialog.cursor_position > 0 {
-	                        dialog.cursor_position -= 1;
+	                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+	                        // Ctrl+Left - переход в родительскую директорию
+	                        if let Some(parent) = dialog.current_dir.parent() {
+	                            dialog.current_dir = parent.to_path_buf();
+	                            dialog.load_directory()?;
+	                        }
+	                    } else {
+	                        // Обычный Left - перемещение курсора
+	                        if dialog.cursor_position > 0 {
+	                            dialog.cursor_position -= 1;
+	                        }
 	                    }
 	                }
 	                KeyCode::Right => {
-	                    if dialog.cursor_position < dialog.filename.len() {
-	                        dialog.cursor_position += 1;
+	                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+	                        // Ctrl+Right - вход в директорию
+	                        dialog.enter_directory()?;
+	                    } else {
+	                        // Обычный Right - перемещение курсора
+	                        if dialog.cursor_position < dialog.filename.len() {
+	                            dialog.cursor_position += 1;
+	                        }
 	                    }
 	                }
 	                KeyCode::Home => {
@@ -432,9 +473,32 @@ impl App {
 	                KeyCode::End => {
 	                    dialog.cursor_position = dialog.filename.len();
 	                }
+	                KeyCode::Tab => {
+	                    // Tab - вставить выбранное имя файла
+	                    dialog.insert_current_dir_to_filename();
+	                }
+	                KeyCode::Down => {
+	                    // Стрелка вниз - навигация по файлам
+	                    if let Some(selected) = dialog.list_state.selected() {
+	                        if selected < dialog.files.len() - 1 {
+	                            dialog.list_state.select(Some(selected + 1));
+	                        }
+	                    } else if !dialog.files.is_empty() {
+	                        dialog.list_state.select(Some(0));
+	                    }
+	                }
+	                KeyCode::Up => {
+	                    // Стрелка вверх - навигация по файлам
+	                    if let Some(selected) = dialog.list_state.selected() {
+	                        if selected > 0 {
+	                            dialog.list_state.select(Some(selected - 1));
+	                        }
+	                    }
+	                }
 	                _ => {}
 	            }
 	        }
+	        Ok(())
 	    }
 	
     // F2 - Play
@@ -956,7 +1020,107 @@ impl App {
             }
         }
 }
+impl SaveDialog {
+    fn load_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.files.clear();
+        
+        // Добавляем переход в родительскую директорию (если не корневая)
+        if self.current_dir.parent().is_some() {
+            self.files.push(FileEntry {
+                path: self.current_dir.parent().unwrap().to_path_buf(),
+                is_dir: true,
+                name: "../".to_string(),
+                selected: false,
+                duration: None,
+            });
+        }
+        
+        let entries = fs::read_dir(&self.current_dir)?;
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
 
+        for entry in entries {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                
+                // Пропускаем скрытые файлы/папки
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with('.') {
+                        continue;
+                    }
+                }
+
+                let is_dir = path.is_dir();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| if is_dir { format!("{}/", s) } else { s.to_string() })
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                if is_dir {
+                    dirs.push(FileEntry {
+                        path: path.clone(),
+                        is_dir: true,
+                        name,
+                        selected: false,
+                        duration: None,
+                    });
+                } else {
+                    files.push(FileEntry {
+                        path: path.clone(),
+                        is_dir: false,
+                        name,
+                        selected: false,
+                        duration: None,
+                    });
+                }
+            }
+        }
+
+        // Сортируем: сначала папки, потом файлы
+        dirs.sort_by(|a, b| a.name.cmp(&b.name));
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+
+        self.files.extend(dirs);
+        self.files.extend(files);
+
+        // Выбираем первый элемент
+        if !self.files.is_empty() {
+            self.list_state.select(Some(0));
+        }
+
+        Ok(())
+    }
+    
+    fn enter_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(selected) = self.list_state.selected() {
+            if let Some(entry) = self.files.get(selected) {
+                if entry.is_dir {
+                    self.current_dir = entry.path.clone();
+                    self.load_directory()?;
+                    // Обновляем имя файла с новой директорией
+                    if let Some(file_name) = self.current_dir.file_name().and_then(|n| n.to_str()) {
+                        self.filename = format!("{}.m3u", file_name);
+                        self.cursor_position = self.filename.len();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    fn insert_current_dir_to_filename(&mut self) {
+        if let Some(selected) = self.list_state.selected() {
+            if let Some(entry) = self.files.get(selected) {
+                if !entry.is_dir {
+                    // Вставляем имя файла в поле ввода
+                    self.filename = entry.name.clone();
+                    self.cursor_position = self.filename.len();
+                }
+            }
+        }
+    }
+}
 fn is_audio_file(path: &Path) -> bool {
     let audio_extensions = ["wav", "flac", "mp3", "ogg", "m4a", "aac", "dsf", "dff", "m3u"];
     path.extension()
@@ -1012,12 +1176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminal.draw(|f| ui(f, &app))?;
 
           // ★★★ ОБРАБОТКА ДИАЛОГА ★★★
+    // В главном цикле, где обрабатывается диалог:
     if let Some(dialog) = &app.save_dialog {
         if dialog.visible {
-            // Блокирующее чтение для диалога
             match event::read()? {
                 Event::Key(key) => {
-                    app.handle_save_dialog_input(key);
+                    if let Err(e) = app.handle_save_dialog_input(key) {
+                        eprintln!("Ошибка в диалоге: {}", e);
+                    }
                 }
                 _ => {}
             }
@@ -1058,7 +1224,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Tab => app.switch_panel(),
                     KeyCode::F(9) => {
                         if app.save_dialog.is_none() {
-                            app.show_save_dialog();
+                            if let Err(e) = app.show_save_dialog() {
+                                eprintln!("Ошибка открытия диалога сохранения: {}", e);
+                            }
                         } else {
                             app.hide_save_dialog();
                         }
@@ -1590,49 +1758,82 @@ if let Some(dialog) = &app.save_dialog {
             .style(Style::default().bg(theme::BACKGROUND));
         frame.render_widget(background, overlay);
         
-        // 3. Рисуем диалог
-        let dialog_area = centered_rect(50, 20, frame.size());
+        // 3. Рисуем диалог большего размера
+        let dialog_area = centered_rect(70, 60, frame.size());
         let dialog_block = Block::default()
             .style(styles::surface())
             .borders(ratatui::widgets::Borders::ALL)
             .border_style(styles::active_panel())
             .title(" Save Playlist ");
         frame.render_widget(dialog_block, dialog_area);
-	        
-	        let inner_chunks = Layout::default()
-	            .direction(Direction::Vertical)
-	            .margin(1)
-	            .constraints([
-	                Constraint::Length(1),
-	                Constraint::Length(3),
-	                Constraint::Length(1),
-	            ])
-	            .split(dialog_area);
-	        
-	        // Текст
-	        let text = Paragraph::new("File name:");
-	        frame.render_widget(text, inner_chunks[0]);
-	        
-	        // Поле ввода с курсором
-	        let input_text = if dialog.cursor_position <= dialog.filename.len() {
-	            let (left, right) = dialog.filename.split_at(dialog.cursor_position);
-	            format!("{}|{}", left, right) // Курсор в виде вертикальной черты
-	        } else {
-	            format!("{}|", dialog.filename)
-	        };
-	        
-	        let input = Paragraph::new(input_text)
-	            .style(Style::default().fg(theme::TEXT_PRIMARY))
-	            .block(Block::default().borders(ratatui::widgets::Borders::ALL));
-	        frame.render_widget(input, inner_chunks[1]);
-	        
-	        // Подсказка
-	        let hint = Paragraph::new(Line::from(Span::styled(
-	            " Enter: Save  Esc: Cancel ",
-	            Style::default().fg(theme::TEXT_SECONDARY),
-	        )));
-	        frame.render_widget(hint, inner_chunks[2]);
-	    }
-	}
+        
+        let inner_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints([
+                Constraint::Length(1), // Текущий путь
+                Constraint::Length(3), // Поле ввода
+                Constraint::Min(10),   // Список файлов
+                Constraint::Length(3), // Подсказки
+            ])
+            .split(dialog_area);
+        
+        // Текущий путь
+        let path_text = Paragraph::new(format!("Path: {}", dialog.current_dir.display()))
+            .style(Style::default().fg(theme::TEXT_SECONDARY));
+        frame.render_widget(path_text, inner_chunks[0]);
+        
+        // Поле ввода с курсором
+        let input_text = if dialog.cursor_position <= dialog.filename.len() {
+            let (left, right) = dialog.filename.split_at(dialog.cursor_position);
+            format!("{}|{}", left, right)
+        } else {
+            format!("{}|", dialog.filename)
+        };
+        
+        let input = Paragraph::new(input_text)
+            .style(Style::default().fg(theme::TEXT_PRIMARY))
+            .block(Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .title(" File name "));
+        frame.render_widget(input, inner_chunks[1]);
+        
+        // Список файлов
+        let files_area = inner_chunks[2];
+        let mut y = 0;
+        
+        for (i, entry) in dialog.files.iter().enumerate() {
+            if y >= files_area.height as usize {
+                break;
+            }
+            
+            let style = if Some(i) == dialog.list_state.selected() {
+                Style::default()
+                    .fg(theme::TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+            } else if entry.is_dir {
+                styles::folder()
+            } else {
+                styles::normal_file()
+            };
+            
+            let line_rect = Rect::new(files_area.x, files_area.y + y as u16, files_area.width, 1);
+            let name_paragraph = Paragraph::new(Line::from(Span::styled(&entry.name, style)))
+                .style(styles::surface());
+            frame.render_widget(name_paragraph, line_rect);
+            
+            y += 1;
+        }
+        
+        // Подсказки
+        let hints = Paragraph::new(Line::from(vec![
+            Span::styled(" Enter: Save  ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" Esc: Cancel  ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" Tab: Insert name  ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled(" Ctrl+←/→: Navigate ", Style::default().fg(theme::TEXT_SECONDARY)),
+        ]));
+        frame.render_widget(hints, inner_chunks[3]);
+    }
+}
 }
 
