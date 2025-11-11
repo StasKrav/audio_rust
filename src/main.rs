@@ -1794,34 +1794,44 @@ if let Some(dialog) = &app.save_dialog {
         
         // Создаем текст с видимым курсором
         let input_text = {
-            let mut result = String::new();
+            let mut spans = Vec::new();
             let chars: Vec<char> = dialog.filename.chars().collect();
             
             // Добавляем текст до курсора
             if dialog.cursor_position > 0 {
-                result.extend(&chars[..dialog.cursor_position]);
+                spans.push(Span::styled(
+                    chars[..dialog.cursor_position].iter().collect::<String>(),
+                    Style::default().fg(theme::TEXT_PRIMARY)
+                ));
             }
             
             // Добавляем курсор (инвертированный символ)
             if dialog.cursor_position < chars.len() {
-                result.push('[');
-                result.push(chars[dialog.cursor_position]);
-                result.push(']');
+                spans.push(Span::styled(
+                    chars[dialog.cursor_position].to_string(),
+                    Style::default().fg(theme::BACKGROUND).bg(theme::TEXT_PRIMARY)
+                ));
                 
                 // Добавляем оставшийся текст
                 if dialog.cursor_position < chars.len() - 1 {
-                    result.extend(&chars[dialog.cursor_position + 1..]);
+                    spans.push(Span::styled(
+                        chars[dialog.cursor_position + 1..].iter().collect::<String>(),
+                        Style::default().fg(theme::TEXT_PRIMARY)
+                    ));
                 }
             } else {
-                // Курсор в конце
-                result.push_str("[ ]");
+                // Курсор в конце - добавляем пробел с инвертированным стилем
+                spans.push(Span::styled(
+                    " ",
+                    Style::default().fg(theme::BACKGROUND).bg(theme::TEXT_PRIMARY)
+                ));
             }
             
-            result
+            Line::from(spans)
         };
 
         let input = Paragraph::new(input_text)
-            .style(Style::default().fg(theme::TEXT_PRIMARY))
+            .style(styles::surface())
             .block(Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
                 .title(" File name "));
