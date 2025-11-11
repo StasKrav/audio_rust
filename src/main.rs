@@ -857,12 +857,13 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     frame.render_widget(Block::default().style(background()), frame.size());
     
     let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(3),
-        ])
-        .split(frame.size());
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),        // Основная область (панели)
+                Constraint::Length(2),     // Две пустые строки (разделитель)
+                Constraint::Length(3),     // Статусная строка
+            ])
+            .split(frame.size());
 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
@@ -1186,6 +1187,11 @@ if let Some(selected) = app.files_list_state.selected() {
             frame.render_widget(highlight, highlight_rect);
         }
     }
+
+		// Рендерим разделитель (две пустые строки) между панелями и статусной строкой
+		    let separator = Paragraph::new("").style(background());
+		    frame.render_widget(separator, chunks[1]);
+    
 // Статусная строка внизу
 let status_chunks = Layout::default()
     .direction(Direction::Horizontal)
@@ -1193,7 +1199,7 @@ let status_chunks = Layout::default()
         Constraint::Percentage(50),  // Левая часть - управление
         Constraint::Percentage(50),  // Правая часть - состояние
     ])
-    .split(chunks[1]);  // chunks[1] - это наша строка статуса
+    .split(chunks[2]);  // chunks[1] - это наша строка статуса
 
 // Левая часть - подсказки по управлению
 let controls_text = if app.active_panel == 0 {
