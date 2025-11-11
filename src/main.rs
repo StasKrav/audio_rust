@@ -146,20 +146,6 @@ fn get_audio_duration(path: &Path) -> Option<std::time::Duration> {
     }
 }
 
-fn is_valid_filename_char(c: char) -> bool {
-    // Разрешаем кириллицу, латиницу, цифры, точки, дефисы, подчеркивания
-    c.is_alphabetic() || 
-    c.is_numeric() || 
-    c == '.' || 
-    c == '-' || 
-    c == '_' || 
-    c == ' ' ||
-    c == '/' || 
-    c == '\\' ||
-    (c >= 'а' && c <= 'я') ||  // кириллица строчные
-    (c >= 'А' && c <= 'Я')     // кириллица заглавные
-}
-
 fn suppress_alsa_warnings() {
     unsafe {
         // Открываем /dev/null
@@ -399,14 +385,13 @@ impl App {
 	
 	fn save_playlist(&self) -> Result<(), Box<dyn std::error::Error>> {
 	    if let Some(dialog) = &self.save_dialog {
-	        // Используем текущую директорию диалога как базовую
 	        let path = if dialog.filename.starts_with('/') || 
 	                     dialog.filename.starts_with('\\') || 
 	                     (dialog.filename.len() > 2 && dialog.filename.chars().nth(1) == Some(':')) {
-	            // Абсолютный путь - используем как есть
+	            // Абсолютный путь
 	            PathBuf::from(&dialog.filename)
 	        } else {
-	            // Относительный путь - относительно текущей директории диалога
+	            // Относительный путь от текущей директории диалога
 	            dialog.current_dir.join(&dialog.filename)
 	        };
 	        
@@ -448,11 +433,9 @@ impl App {
 	                    self.hide_save_dialog();
 	                }
 	                KeyCode::Char(c) => {
-	                    // Проверяем, что символ допустим для имени файла
-	                    if is_valid_filename_char(c) {
-	                        dialog.filename.insert(dialog.cursor_position, c);
-	                        dialog.cursor_position += 1;
-	                    }
+	                    // РАЗРЕШАЕМ ВСЕ СИМВОЛЫ - кириллица будет работать
+	                    dialog.filename.insert(dialog.cursor_position, c);
+	                    dialog.cursor_position += 1;
 	                }
 	                KeyCode::Backspace => {
 	                    if dialog.cursor_position > 0 {
@@ -468,7 +451,7 @@ impl App {
 	                            dialog.load_directory()?;
 	                        }
 	                    } else {
-	                        // Обычный Left - перемещение курсора
+	                        // Обычный Left
 	                        if dialog.cursor_position > 0 {
 	                            dialog.cursor_position -= 1;
 	                        }
@@ -479,7 +462,7 @@ impl App {
 	                        // Ctrl+Right - вход в директорию
 	                        dialog.enter_directory()?;
 	                    } else {
-	                        // Обычный Right - перемещение курсора
+	                        // Обычный Right
 	                        if dialog.cursor_position < dialog.filename.len() {
 	                            dialog.cursor_position += 1;
 	                        }
@@ -491,12 +474,8 @@ impl App {
 	                KeyCode::End => {
 	                    dialog.cursor_position = dialog.filename.len();
 	                }
-	                KeyCode::Tab => {
-	                    // Tab - вставить выбранное имя файла
-	                    dialog.insert_current_dir_to_filename();
-	                }
 	                KeyCode::Down => {
-	                    // Стрелка вниз - навигация по файлам
+	                    // Навигация по файлам
 	                    if let Some(selected) = dialog.list_state.selected() {
 	                        if selected < dialog.files.len() - 1 {
 	                            dialog.list_state.select(Some(selected + 1));
@@ -506,7 +485,7 @@ impl App {
 	                    }
 	                }
 	                KeyCode::Up => {
-	                    // Стрелка вверх - навигация по файлам
+	                    // Навигация по файлам
 	                    if let Some(selected) = dialog.list_state.selected() {
 	                        if selected > 0 {
 	                            dialog.list_state.select(Some(selected - 1));
@@ -1136,28 +1115,15 @@ impl SaveDialog {
                             self.current_dir = parent.to_path_buf();
                         }
                     }
-                    // Обновляем имя файла с новой директорией
-                    if let Some(file_name) = self.current_dir.file_name().and_then(|n| n.to_str()) {
-                        self.filename = format!("{}.m3u", file_name);
-                        self.cursor_position = self.filename.len();
-                    }
+                   
+                   
                 }
             }
         }
         Ok(())
     }
     
-    fn insert_current_dir_to_filename(&mut self) {
-        if let Some(selected) = self.list_state.selected() {
-            if let Some(entry) = self.files.get(selected) {
-                if !entry.is_dir {
-                    // Вставляем имя файла в поле ввода
-                    self.filename = entry.name.clone();
-                    self.cursor_position = self.filename.len();
-                }
-            }
-        }
-    }
+    
 } // <-- Закрывающая фигурная скобка для impl SaveDialog
 fn is_audio_file(path: &Path) -> bool {
     let audio_extensions = ["wav", "flac", "mp3", "ogg", "m4a", "aac", "dsf", "dff", "m3u"];
@@ -1798,7 +1764,7 @@ if let Some(dialog) = &app.save_dialog {
             .style(Style::default().bg(theme::BACKGROUND));
         frame.render_widget(background, overlay);
         
-        // 3. Рисуем диалог большего размера
+        // 3. Рисуем диалог
         let dialog_area = centered_rect(70, 60, frame.size());
         let dialog_block = Block::default()
             .style(styles::surface())
@@ -1814,7 +1780,7 @@ if let Some(dialog) = &app.save_dialog {
                 Constraint::Length(1), // Текущий путь
                 Constraint::Length(3), // Поле ввода
                 Constraint::Min(10),   // Список файлов
-                Constraint::Length(3), // Подсказки
+                Constraint::Length(1), // Подсказки
             ])
             .split(dialog_area);
         
@@ -1823,20 +1789,43 @@ if let Some(dialog) = &app.save_dialog {
             .style(Style::default().fg(theme::TEXT_SECONDARY));
         frame.render_widget(path_text, inner_chunks[0]);
         
-        // Поле ввода с курсором
-        let input_text = if dialog.cursor_position <= dialog.filename.len() {
-            let (left, right) = dialog.filename.split_at(dialog.cursor_position);
-            format!("{}|{}", left, right)
-        } else {
-            format!("{}|", dialog.filename)
-        };
+        // Поле ввода с курсором - ПРОСТОЙ ВАРИАНТ
+        let input_area = inner_chunks[1];
         
+        // Создаем текст с видимым курсором
+        let input_text = {
+            let mut result = String::new();
+            let chars: Vec<char> = dialog.filename.chars().collect();
+            
+            // Добавляем текст до курсора
+            if dialog.cursor_position > 0 {
+                result.extend(&chars[..dialog.cursor_position]);
+            }
+            
+            // Добавляем курсор (инвертированный символ)
+            if dialog.cursor_position < chars.len() {
+                result.push('[');
+                result.push(chars[dialog.cursor_position]);
+                result.push(']');
+                
+                // Добавляем оставшийся текст
+                if dialog.cursor_position < chars.len() - 1 {
+                    result.extend(&chars[dialog.cursor_position + 1..]);
+                }
+            } else {
+                // Курсор в конце
+                result.push_str("[ ]");
+            }
+            
+            result
+        };
+
         let input = Paragraph::new(input_text)
             .style(Style::default().fg(theme::TEXT_PRIMARY))
             .block(Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
                 .title(" File name "));
-        frame.render_widget(input, inner_chunks[1]);
+        frame.render_widget(input, input_area);
         
         // Список файлов
         let files_area = inner_chunks[2];
@@ -1869,11 +1858,9 @@ if let Some(dialog) = &app.save_dialog {
         let hints = Paragraph::new(Line::from(vec![
             Span::styled(" Enter: Save  ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled(" Esc: Cancel  ", Style::default().fg(theme::TEXT_SECONDARY)),
-            Span::styled(" Tab: Insert name  ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled(" Ctrl+←/→: Navigate ", Style::default().fg(theme::TEXT_SECONDARY)),
         ]));
         frame.render_widget(hints, inner_chunks[3]);
     }
-}
-}
+}}
 
