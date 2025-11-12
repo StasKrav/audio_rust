@@ -1020,17 +1020,7 @@ impl App {
 impl SaveDialog {
     fn load_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.files.clear();
-        
-        // Добавляем переход в родительскую директорию (если не корневая)
-        if self.current_dir.parent().is_some() {
-            self.files.push(FileEntry {
-                path: self.current_dir.parent().unwrap().to_path_buf(),
-                is_dir: true,
-                name: "../".to_string(),
-                selected: false,
-                duration: None,
-            });
-        }
+
         
         let entries = match fs::read_dir(&self.current_dir) {
             Ok(entries) => entries,
@@ -1375,6 +1365,8 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
 
         let duration_text = if entry.is_dir {
             "".to_string()
+        } else if entry.path.extension().map_or(false, |ext| ext == "m3u") {
+            "".to_string() // Для M3U файлов не показываем длительность
         } else {
             format_duration(entry.duration)
         };
@@ -1516,7 +1508,11 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         let icon = if entry.playing { "▶ " } else { " " };
         let selection_indicator = "  ";
 
-        let duration_text = format_duration(entry.duration);
+        let duration_text = if entry.path.extension().map_or(false, |ext| ext == "m3u") {
+            "".to_string() // Для M3U файлов в плейлисте не показываем длительность
+        } else {
+            format_duration(entry.duration)
+        };
 
         // Вычисляем оригинальный индекс для подсветки
         let original_index = i;
@@ -1752,6 +1748,8 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         .alignment(ratatui::layout::Alignment::Right);
 
     frame.render_widget(status_paragraph, status_chunks[1]);
+
+// ------------ диалоговое окно ---------------------------
 if let Some(dialog) = &app.save_dialog {
     if dialog.visible {
         let overlay = Rect::new(0, 0, frame.size().width, frame.size().height);
@@ -1767,7 +1765,7 @@ if let Some(dialog) = &app.save_dialog {
         // 3. Рисуем диалог
         let dialog_area = centered_rect(70, 60, frame.size());
         let dialog_block = Block::default()
-            .style(styles::surface())
+            .style(styles::active_panel())
             .borders(ratatui::widgets::Borders::NONE)
             .border_style(styles::active_panel())
             .title(" Save Playlist ");
@@ -1777,19 +1775,20 @@ if let Some(dialog) = &app.save_dialog {
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(1), // Текущий путь
-                Constraint::Length(3), // Поле ввода
-                Constraint::Min(10),   // Список файлов
-                Constraint::Length(1), // Подсказки
+                Constraint::Length(1), // [0] Текущий путь
+                Constraint::Length(3), // [1] Поле ввода  
+                Constraint::Min(10),   // [2] Список файлов
+                Constraint::Length(1), // [3] ПУСТАЯ СТРОКА-РАЗДЕЛИТЕЛЬ
+                Constraint::Length(1), // [4] Подсказки
             ])
             .split(dialog_area);
         
         // Текущий путь
         let path_text = Paragraph::new(format!("Path: {}", dialog.current_dir.display()))
-            .style(Style::default().fg(theme::TEXT_SECONDARY));
+            .style(Style::default().fg(theme::TEXT_DISABLED));
         frame.render_widget(path_text, inner_chunks[0]);
         
-        // Поле ввода с курсором - ПРОСТОЙ ВАРИАНТ
+        // Поле ввода с курсором
         let input_area = inner_chunks[1];
         
         // Создаем текст с видимым курсором
@@ -1834,19 +1833,35 @@ if let Some(dialog) = &app.save_dialog {
             .style(styles::surface())
             .block(Block::default()
                 .borders(ratatui::widgets::Borders::NONE)
-                .title(" File name "));
+                .title("File name "));
         frame.render_widget(input, input_area);
         
-        // Список файлов
+        // СПИСОК ФАЙЛОВ С ПРАВИЛЬНЫМ СКРОЛЛИНГОМ
         let files_area = inner_chunks[2];
         let mut y = 0;
-        
-        for (i, entry) in dialog.files.iter().enumerate() {
+
+        // ВЫЧИСЛЯЕМ СКРОЛЛ ДИНАМИЧЕСКИ (как в основном интерфейсе)
+        let scroll_offset = if let Some(selected) = dialog.list_state.selected() {
+            let visible_items = files_area.height as usize;
+            if selected >= visible_items {
+                selected - visible_items + 1
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // Рендерим только видимые элементы
+        for (i, entry) in dialog.files.iter().enumerate().skip(scroll_offset) {
             if y >= files_area.height as usize {
                 break;
             }
             
-            let style = if Some(i) == dialog.list_state.selected() {
+            // Вычисляем оригинальный индекс для подсветки
+            let original_index = i;
+            
+            let style = if Some(original_index) == dialog.list_state.selected() {
                 Style::default()
                     .fg(theme::TEXT_PRIMARY)
                     .add_modifier(Modifier::BOLD)
@@ -1863,14 +1878,34 @@ if let Some(dialog) = &app.save_dialog {
             
             y += 1;
         }
+
+        // ПОДСВЕТКА ВЫБРАННОГО ЭЛЕМЕНТА (только если он видим)
+        if let Some(selected) = dialog.list_state.selected() {
+            if selected >= scroll_offset && (selected - scroll_offset) < files_area.height as usize {
+                let highlight_y = (selected - scroll_offset) as u16;
+                let highlight_rect = Rect::new(
+                    files_area.x,
+                    files_area.y + highlight_y,
+                    files_area.width,
+                    1,
+                );
+                let highlight = Paragraph::new("")
+                    .style(Style::default().bg(theme::SELECTED));
+                frame.render_widget(highlight, highlight_rect);
+            }
+        }
+        // ПУСТАЯ СТРОКА-РАЗДЕЛИТЕЛЬ
+        let separator_area = inner_chunks[3];
+        let separator = Paragraph::new("").style(styles::surface());
+        frame.render_widget(separator, separator_area);
         
         // Подсказки
         let hints = Paragraph::new(Line::from(vec![
-            Span::styled(" Enter: Save  ", Style::default().fg(theme::TEXT_SECONDARY)),
+            Span::styled("Enter: Save  ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled(" Esc: Cancel  ", Style::default().fg(theme::TEXT_SECONDARY)),
             Span::styled(" Ctrl+←/→: Navigate ", Style::default().fg(theme::TEXT_SECONDARY)),
         ]));
-        frame.render_widget(hints, inner_chunks[3]);
+        frame.render_widget(hints, inner_chunks[4]);
     }
-}}
-
+}
+}
