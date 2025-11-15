@@ -73,24 +73,23 @@ hi-res-player
 
 ###  Поддерживаемые форматы
 
-FLAC, WAV, OGG, M4A, AAC
+- FLAC, WAV, OGG, M4A, AAC
 
-DSD (DSF, DFF)
+- DSD (DSF, DFF)
 
-Плейлисты M3U
+- Плейлисты M3U
 
- Разработка
 
 ## Клонирование и запуск для разработки
-
+```
 git clone https://github.com/твой-username/hi-res-player.git
 cd hi-res-player
 cargo run
-
+```
 ## Запуск тестов
-
+```
 cargo test
-
+```
 ##  Roadmap
 
 Базовое воспроизведение
@@ -107,6 +106,3 @@ cargo test
 
 MIT License - смотри файл LICENSE
 
-```
-
-```
