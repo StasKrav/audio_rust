@@ -1,5 +1,5 @@
-mod audio_engine;
-use audio_engine::SymphoniaSource;
+mod audio_engine_cpal;
+use audio_engine_cpal::{HighQualityPlayer, CpalSymphoniaSource};
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -15,12 +15,10 @@ use ratatui::{
     widgets::{Block, Clear, ListState, Paragraph},
     Terminal,
 };
-use rodio::{Decoder, OutputStream, Sink};
+
 use std::env;
 use std::fs;
-use std::fs::File;
 use std::io;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -130,23 +128,12 @@ struct PlaylistEntry {
     duration: Option<std::time::Duration>, // Добавляем длительность
 }
 fn get_audio_duration(path: &Path) -> Option<std::time::Duration> {
-    match SymphoniaSource::new(path) {
+    match CpalSymphoniaSource::new(path) {
         Ok(source) => source.duration(),
         Err(_) => None,
     }
 }
 
-fn suppress_alsa_warnings() {
-    unsafe {
-        // Открываем /dev/null
-        let null_fd = libc::open("/dev/null\0".as_ptr() as *const i8, libc::O_WRONLY);
-        if null_fd >= 0 {
-            // Перенаправляем stderr в /dev/null
-            libc::dup2(null_fd, 2); // 2 = stderr
-            libc::close(null_fd);
-        }
-    }
-}
 
 fn format_duration(duration: Option<std::time::Duration>) -> String {
     match duration {
@@ -173,10 +160,8 @@ struct App {
     playlist_list_state: ListState,
     active_panel: usize,
 
-    // ЗАМЕНЯЕМ rodio поля на symphonia
-    sink: Option<rodio::Sink>,
-    _stream: Option<OutputStream>,
-
+    audio_player: HighQualityPlayer,
+   
     current_playlist_index: usize,
     is_playing: bool,
     current_playing_path: Option<PathBuf>,
@@ -317,6 +302,9 @@ impl App {
         // Канонизируем путь (убираем ../ и ./)
         let current_dir = current_dir.canonicalize().unwrap_or(current_dir);
 
+        let audio_player = HighQualityPlayer::new()
+            .map_err(|e| format!("Failed to initialize audio player: {}", e))?;
+
         let mut app = App {
             current_dir,
             files: Vec::new(),
@@ -324,9 +312,7 @@ impl App {
             files_list_state: ListState::default(),
             playlist_list_state: ListState::default(),
             active_panel: 0,
-            // current_source: None,  // ← НОВОЕ
-            sink: None,
-            _stream: None,
+            audio_player,
             current_playlist_index: 0,
             is_playing: false,
             current_playing_path: None,
@@ -415,13 +401,12 @@ impl App {
     //
     // ОБНОВЛЯЕМ update_playback_progress - ВОЗВРАЩАЕМ РАСЧЕТНОЕ ВРЕМЯ
     fn update_playback_progress(&mut self) {
-        if self.is_playing {
-            if let Some(start_time) = self.playback_start_time {
-                // РАСЧЕТНОЕ ВРЕМЯ ОТ СТАРТА ВОСПРОИЗВЕДЕНИЯ
-                self.current_playback_position = start_time.elapsed();
+            if self.is_playing {
+                if let Some(start_time) = self.playback_start_time {
+                    self.current_playback_position = start_time.elapsed();
+                }
             }
         }
-    }
     //
     // // УПРОЩАЕМ get_current_track_duration
     // fn get_current_track_duration(&self) -> Option<Duration> {
@@ -581,61 +566,39 @@ impl App {
 
     // F2 - Play
     fn play(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Если на паузе - продолжаем
-        if let Some(sink) = &self.sink {
-            if sink.is_paused() {
-                sink.play();
+            // Если на паузе - продолжаем
+            if self.audio_player.is_playing() && !self.is_playing {
+                self.audio_player.resume()?;
                 self.is_playing = true;
-                // println!("▶ Продолжено воспроизведение");
+                self.playback_start_time = Some(std::time::Instant::now() - self.current_playback_position);
                 return Ok(());
             }
+    
+            // Иначе начинаем новое воспроизведение
+            self.start_playback()?;
+            Ok(())
         }
-
-        // Иначе начинаем новое воспроизведение
-        // println!("▶ Запуск воспроизведения");
-        self.start_playback()?;
-        Ok(())
-    }
-
-    // F3 - Pause/Unpause
-    // ОБНОВЛЯЕМ ПРОГРЕСС В pause()
-    fn pause(&mut self) {
-        if let Some(sink) = &self.sink {
-            if sink.is_paused() {
-                sink.play();
-                self.is_playing = true;
-                // ВОССТАНАВЛИВАЕМ ВРЕМЯ ПРИ СНЯТИИ ПАУЗЫ
-                if self.playback_start_time.is_none() {
-                    self.playback_start_time =
-                        Some(std::time::Instant::now() - self.current_playback_position);
-                }
-            } else {
-                sink.pause();
+    
+        fn pause(&mut self) {
+            if self.audio_player.is_playing() {
+                self.audio_player.pause();
                 self.is_playing = false;
-                // СОХРАНЯЕМ ПОЗИЦИЮ ПРИ ПАУЗЕ
-                if let Some(_start_time) = self.playback_start_time {
-                    // ← добавляем _
-                    self.current_playback_position = _start_time.elapsed();
+                // Сохраняем позицию при паузе
+                if let Some(start_time) = self.playback_start_time {
+                    self.current_playback_position = start_time.elapsed();
                     self.playback_start_time = None;
                 }
             }
         }
-    }
-
-    // F4 - Stop
-    // ОБНОВЛЯЕМ ПРОГРЕСС В stop()
-    fn stop(&mut self) {
-        if let Some(sink) = &self.sink {
-            sink.stop();
+    
+        fn stop(&mut self) {
+            self.audio_player.stop();
+            self.is_playing = false;
+            self.current_playing_path = None;
+            self.current_playback_position = std::time::Duration::ZERO;
+            self.playback_start_time = None;
+            self.update_playing_status();
         }
-        self.sink = None;
-        self._stream = None;
-        self.is_playing = false;
-        self.current_playing_path = None;
-        self.current_playback_position = std::time::Duration::ZERO;
-        self.playback_start_time = None;
-        self.update_playing_status();
-    }
 
     fn load_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.files.clear();
@@ -880,121 +843,105 @@ impl App {
 
     // Увеличение громкости
     fn volume_up(&mut self) {
-        if let Some(sink) = &self.sink {
-            let new_volume = (sink.volume() + 0.1).min(1.0);
-            sink.set_volume(new_volume);
-            // println!("🔊 Громкость: {:.0}%", new_volume * 100.0);
+            let new_volume = (self.audio_player.get_volume() + 0.1).min(1.0);
+            self.audio_player.set_volume(new_volume);
         }
-    }
-
-    // Уменьшение громкости
-    fn volume_down(&mut self) {
-        if let Some(sink) = &self.sink {
-            let new_volume = (sink.volume() - 0.1).max(0.0);
-            sink.set_volume(new_volume);
-            // println!("🔈 Громкость: {:.0}%", new_volume * 100.0);
+    
+        fn volume_down(&mut self) {
+            let new_volume = (self.audio_player.get_volume() - 0.1).max(0.0);
+            self.audio_player.set_volume(new_volume);
         }
-    }
     fn switch_panel(&mut self) {
         self.active_panel = (self.active_panel + 1) % 2;
     }
 
     // Переименовываем старый метод play в start_playback
     fn start_playback(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.stop();
+          self.stop();
 
-        let file_to_play = match self.active_panel {
-            0 => {
-                if let Some(selected) = self.files_list_state.selected() {
-                    self.files
-                        .get(selected)
-                        .filter(|entry| !entry.is_dir)
-                        .map(|entry| entry.path.clone())
-                } else {
-                    None
-                }
-            }
-            1 => {
-                if let Some(selected) = self.playlist_list_state.selected() {
-                    self.playlist.get(selected).map(|entry| entry.path.clone())
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
+          let file_to_play = match self.active_panel {
+              0 => {
+                  if let Some(selected) = self.files_list_state.selected() {
+                      self.files
+                          .get(selected)
+                          .filter(|entry| !entry.is_dir)
+                          .map(|entry| entry.path.clone())
+                  } else {
+                      None
+                  }
+              }
+              1 => {
+                  if let Some(selected) = self.playlist_list_state.selected() {
+                      self.playlist.get(selected).map(|entry| entry.path.clone())
+                  } else {
+                      None
+                  }
+              }
+              _ => None,
+          };
 
-        if let Some(path) = file_to_play {
-            // СОЗДАЕМ ИСТОЧНИК
-            let source = SymphoniaSource::new(&path)?;
+          if let Some(path) = file_to_play {
+              let source = CpalSymphoniaSource::new(&path)?;
+              
+              self.audio_player.play_source(&source)?;
+              
+              self.current_playing_path = Some(path);
+              self.is_playing = true;
+              self.current_playback_position = std::time::Duration::ZERO;
+              self.playback_start_time = Some(std::time::Instant::now());
 
-            // СОЗДАЕМ RODIO SINK
-            let (stream, stream_handle) = OutputStream::try_default()?;
-            let sink = Sink::try_new(&stream_handle)?;
+              self.update_playing_status();
+          }
 
-            sink.append(source);
-            sink.play();
+          Ok(())
+      }
 
-            // ОБНОВЛЯЕМ СОСТОЯНИЕ
-            self.sink = Some(sink);
-            self._stream = Some(stream);
-            self.current_playing_path = Some(path);
-            self.is_playing = true;
-            self.current_playback_position = std::time::Duration::ZERO;
-            self.playback_start_time = Some(std::time::Instant::now());
+    // fn next_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    //     // println!("⏭️ Следующий трек");
+    //     self.play_next() // <-- Использовать правильный метод
+    // }
 
-            self.update_playing_status();
-        }
-
-        Ok(())
-    }
-
-    fn next_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // println!("⏭️ Следующий трек");
-        self.play_next() // <-- Использовать правильный метод
-    }
-
-    fn previous_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.current_playlist_index > 0 {
-            self.current_playlist_index -= 1;
-
-            if let Some(sink) = &self.sink {
-                sink.stop();
-            }
-
-            let files_to_play: Vec<PathBuf> = self
-                .playlist
-                .iter()
-                .map(|entry| entry.path.clone())
-                .collect();
-
-            if self.current_playlist_index < files_to_play.len() {
-                if let Some(prev_file) = files_to_play.get(self.current_playlist_index) {
-                    self.current_playing_path = Some(prev_file.clone());
-
-                    let file = File::open(prev_file)?;
-                    let source = Decoder::new(BufReader::new(file))?;
-
-                    let (stream, stream_handle) = OutputStream::try_default()?;
-                    let sink = Sink::try_new(&stream_handle)?;
-                    sink.append(source);
-                    sink.play();
-
-                    self._stream = Some(stream);
-                    self.sink = Some(sink);
-                    self.is_playing = true;
-
-                    // СБРАСЫВАЕМ И ЗАПУСКАЕМ ПРОГРЕСС ДЛЯ ПРЕДЫДУЩЕГО ТРЕКА
-                    self.current_playback_position = std::time::Duration::ZERO;
-                    self.playback_start_time = Some(std::time::Instant::now());
-
-                    self.update_playing_status();
-                }
-            }
-        }
-
-        Ok(())
-    }
+//     fn previous_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+//         if self.current_playlist_index > 0 {
+//             self.current_playlist_index -= 1;
+// 
+//             if let Some(sink) = &self.sink {
+//                 sink.stop();
+//             }
+// 
+//             let files_to_play: Vec<PathBuf> = self
+//                 .playlist
+//                 .iter()
+//                 .map(|entry| entry.path.clone())
+//                 .collect();
+// 
+//             if self.current_playlist_index < files_to_play.len() {
+//                 if let Some(prev_file) = files_to_play.get(self.current_playlist_index) {
+//                     self.current_playing_path = Some(prev_file.clone());
+// 
+//                     let file = File::open(prev_file)?;
+//                     let source = Decoder::new(BufReader::new(file))?;
+// 
+//                     let (stream, stream_handle) = OutputStream::try_default()?;
+//                     let sink = Sink::try_new(&stream_handle)?;
+//                     sink.append(source);
+//                     sink.play();
+// 
+//                     self._stream = Some(stream);
+//                     self.sink = Some(sink);
+//                     self.is_playing = true;
+// 
+//                     // СБРАСЫВАЕМ И ЗАПУСКАЕМ ПРОГРЕСС ДЛЯ ПРЕДЫДУЩЕГО ТРЕКА
+//                     self.current_playback_position = std::time::Duration::ZERO;
+//                     self.playback_start_time = Some(std::time::Instant::now());
+// 
+//                     self.update_playing_status();
+//                 }
+//             }
+//         }
+// 
+//         Ok(())
+//     }
 
     fn update_playing_status(&mut self) {
         // Сбрасываем статус playing у всех треков
@@ -1013,71 +960,65 @@ impl App {
         }
     }
 
-    fn play_next(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(sink) = &self.sink {
-            sink.stop();
-        }
-
-        self.current_playlist_index += 1;
-
-        // Определяем следующий файл для воспроизведения
-        let files_to_play: Vec<PathBuf> = self
-            .playlist
-            .iter()
-            .map(|entry| entry.path.clone())
-            .collect();
-
-        // Проверяем есть ли еще треки
-        if self.current_playlist_index >= files_to_play.len() {
-            self.is_playing = false;
-            self.current_playlist_index = 0;
-            self.current_playing_path = None;
-            // СБРАСЫВАЕМ ПРОГРЕСС
-            self.current_playback_position = std::time::Duration::ZERO;
-            self.playback_start_time = None;
-            self.update_playing_status();
-            return Ok(());
-        }
-
-        // Воспроизводим следующий трек
-        if let Some(next_file) = files_to_play.get(self.current_playlist_index) {
-            self.current_playing_path = Some(next_file.clone());
-
-            let file = File::open(next_file)?;
-            let source = Decoder::new(BufReader::new(file))?;
-
-            let (stream, stream_handle) = OutputStream::try_default()?;
-            let sink = Sink::try_new(&stream_handle)?;
-            sink.append(source);
-            sink.play();
-
-            self._stream = Some(stream);
-            self.sink = Some(sink);
-            self.is_playing = true;
-
-            // СБРАСЫВАЕМ И ЗАПУСКАЕМ ПРОГРЕСС ДЛЯ НОВОГО ТРЕКА
-            self.current_playback_position = std::time::Duration::ZERO;
-            self.playback_start_time = Some(std::time::Instant::now());
-
-            self.update_playing_status();
-        }
-
-        Ok(())
-    }
+//     fn play_next(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+//         if let Some(sink) = &self.sink {
+//             sink.stop();
+//         }
+// 
+//         self.current_playlist_index += 1;
+// 
+//         // Определяем следующий файл для воспроизведения
+//         let files_to_play: Vec<PathBuf> = self
+//             .playlist
+//             .iter()
+//             .map(|entry| entry.path.clone())
+//             .collect();
+// 
+//         // Проверяем есть ли еще треки
+//         if self.current_playlist_index >= files_to_play.len() {
+//             self.is_playing = false;
+//             self.current_playlist_index = 0;
+//             self.current_playing_path = None;
+//             // СБРАСЫВАЕМ ПРОГРЕСС
+//             self.current_playback_position = std::time::Duration::ZERO;
+//             self.playback_start_time = None;
+//             self.update_playing_status();
+//             return Ok(());
+//         }
+// 
+//         // Воспроизводим следующий трек
+//         if let Some(next_file) = files_to_play.get(self.current_playlist_index) {
+//             self.current_playing_path = Some(next_file.clone());
+// 
+//             let file = File::open(next_file)?;
+//             let source = Decoder::new(BufReader::new(file))?;
+// 
+//             let (stream, stream_handle) = OutputStream::try_default()?;
+//             let sink = Sink::try_new(&stream_handle)?;
+//             sink.append(source);
+//             sink.play();
+// 
+//             self._stream = Some(stream);
+//             self.sink = Some(sink);
+//             self.is_playing = true;
+// 
+//             // СБРАСЫВАЕМ И ЗАПУСКАЕМ ПРОГРЕСС ДЛЯ НОВОГО ТРЕКА
+//             self.current_playback_position = std::time::Duration::ZERO;
+//             self.playback_start_time = Some(std::time::Instant::now());
+// 
+//             self.update_playing_status();
+//         }
+// 
+//         Ok(())
+//     }
 
     fn check_playback_finished(&mut self) {
-        if let Some(sink) = &self.sink {
-            if sink.empty() && self.is_playing {
-                self.current_playback_position = std::time::Duration::ZERO;
-                self.playback_start_time = None;
-
-                if let Err(_e) = self.play_next() {
-                    self.is_playing = false;
-                    self.update_playing_status();
-                }
+            if self.is_playing && self.audio_player.samples_remaining() == 0 {
+                // Просто останавливаем воспроизведение
+                self.stop();
             }
         }
-    }
+    
 }
 impl SaveDialog {
     fn load_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -1206,7 +1147,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    suppress_alsa_warnings();
     // Увеличиваем размер аудиобуфера для предотвращения underrun
     env::set_var("RUST_AUDIO_BACKEND_BUFFER_SIZE", "8192");
     env::set_var("RUST_AUDIO_LATENCY", "1");
@@ -1290,16 +1230,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::F(4) => app.stop(),
 
                     // Группа 2: Навигация по трекам (F5-F8)
-                    KeyCode::F(5) => {
-                        if let Err(e) = app.previous_track() {
-                            eprintln!("Ошибка переключения трека: {}", e);
-                        }
-                    }
-                    KeyCode::F(6) => {
-                        if let Err(e) = app.next_track() {
-                            eprintln!("Ошибка переключения трека: {}", e);
-                        }
-                    }
+                    // KeyCode::F(5) => {
+                    //     if let Err(e) = app.previous_track() {
+                    //         eprintln!("Ошибка переключения трека: {}", e);
+                    //     }
+                    // }
+                    // KeyCode::F(6) => {
+                    //     if let Err(e) = app.next_track() {
+                    //         eprintln!("Ошибка переключения трека: {}", e);
+                    //     }
+                    // }
                     // KeyCode::F(7) => {
                     //     if let Err(e) = app.rewind_backward() {
                     //         eprintln!("Ошибка перемотки назад: {}", e);
@@ -1359,13 +1299,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // В match key.code { ... } добавь:
-                    KeyCode::Esc => {
-                        if app.show_help {
-                            app.show_help = false; // Закрыть справку по Esc
-                        } else {
-                            break 'main; // Выйти из приложения
-                        }
-                    }
+                    // KeyCode::Esc => {
+                    //     if app.show_help {
+                    //         app.show_help = false; // Закрыть справку по Esc
+                    //     } else {
+                    //         break 'main; // Выйти из приложения
+                    //     }
+                    // }
 
                     // Действия
                     KeyCode::Enter => {
@@ -1822,24 +1762,14 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     };
 
     // Объединяем с информацией о состоянии
-    let status_icon = if let Some(sink) = &app.sink {
-        if sink.is_paused() {
-            "⏸ "
-        } else if app.is_playing {
-            "▶ "
-        } else {
-            "⏹ "
-        }
-    } else {
-        "⏹ "
-    };
+// В функции ui() замените:
+let volume_text = format!("{:.0}%", app.audio_player.get_volume() * 100.0);
 
-    let volume_text = if let Some(sink) = &app.sink {
-        format!("{:.0}%", sink.volume() * 100.0)
-    } else {
-        "100%".to_string()
-    };
-
+let status_icon = if app.audio_player.is_playing() {
+    "▶ "
+} else {
+    "⏹ "
+};
     // Создаем цветной прогресс-бар с Spans
     let status_line = Line::from(vec![
         Span::raw(status_icon),
