@@ -205,17 +205,28 @@ impl Iterator for SymphoniaSource {
 
         let sample = match buffer {
             AudioBufferRef::F32(buf) => buf.chan(channel)[frame],
+            AudioBufferRef::F64(buf) => buf.chan(channel)[frame] as f32,
             AudioBufferRef::S16(buf) => buf.chan(channel)[frame] as f32 / i16::MAX as f32,
             AudioBufferRef::S24(buf) => {
-                // Для S24 используем ручное преобразование
                 let sample_i24 = buf.chan(channel)[frame];
-                // Преобразуем i24 в i32 (i24 хранится в младших 24 битах i32)
                 let sample_i32 = sample_i24.0 as i32;
-                sample_i32 as f32 / 8_388_607.0 // 2^23 - 1
+                sample_i32 as f32 / 8_388_607.0
             }
             AudioBufferRef::S32(buf) => buf.chan(channel)[frame] as f32 / i32::MAX as f32,
             AudioBufferRef::U8(buf) => (buf.chan(channel)[frame] as f32 - 128.0) / 128.0,
-            _ => 0.0,
+            AudioBufferRef::U16(buf) => (buf.chan(channel)[frame] as f32 - 32768.0) / 32768.0,
+            AudioBufferRef::U24(buf) => {
+                let sample_u24 = buf.chan(channel)[frame];
+                let sample_u32 = sample_u24.0 as u32;
+                (sample_u32 as f32 - 8_388_608.0) / 8_388_607.0
+            }
+            AudioBufferRef::U32(buf) => (buf.chan(channel)[frame] as f32 - 2_147_483_648.0) / 2_147_483_647.0,
+            // Обработка всех остальных форматов
+            _ => {
+                // Для неподдерживаемых форматов возвращаем 0.0
+                // Можно добавить логирование для отладки
+                0.0
+            }
         };
 
         self.buffer_pos += 1;

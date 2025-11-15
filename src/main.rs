@@ -272,7 +272,7 @@ fn parse_m3u_file(path: &Path) -> Result<Vec<PlaylistEntry>, Box<dyn std::error:
 
 // Вспомогательная функция для проверки аудио расширений
 fn is_audio_extension(ext: &std::ffi::OsStr) -> bool {
-    let audio_extensions = ["wav", "flac", "ogg", "m4a", "aac", "dsf", "dff"];
+    let audio_extensions = ["wav", "flac", "ogg", "aiff", "aif", "aifc", "m4a", "caf"];
     ext.to_str()
         .map(|ext| audio_extensions.contains(&ext.to_lowercase().as_str()))
         .unwrap_or(false)
@@ -1177,7 +1177,7 @@ impl SaveDialog {
     }
 } // <-- Закрывающая фигурная скобка для impl SaveDialog
 fn is_audio_file(path: &Path) -> bool {
-    let audio_extensions = ["wav", "flac", "ogg", "m4a", "aac", "dsf", "dff", "m3u"];
+    let audio_extensions = ["wav", "flac", "ogg", "m3u", "aiff", "aif", "aifc", "m4a", "caf"];
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| audio_extensions.contains(&ext.to_lowercase().as_str()))
@@ -2136,16 +2136,6 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
             ]),
             Line::from(""),
             Line::from(vec![Span::styled(
-                "Форматы:",
-                Style::default()
-                    .fg(theme::PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            Line::from(""),
-            Line::from("  FLAC, WAV, OGG, M4A, AAC, DSD (DSF, DFF)"),
-            Line::from(""),
-            Line::from(""),
-            Line::from(vec![Span::styled(
                 "Управление в справке:",
                 Style::default()
                     .fg(theme::PRIMARY)
@@ -2196,8 +2186,8 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
             Line::from("  • FLAC - формат без потерь"),
             Line::from("  • WAV - несжатый аудио"),
             Line::from("  • OGG/Vorbis - открытый формат"),
-            Line::from("  • M4A/AAC - современный формат"),
-            Line::from("  • DSD (DSF, DFF) - Super Audio CD"),
+            Line::from("  • AIFF/AIFC - Audio Interchange File Format"),
+            Line::from("  • ALAC - Apple Lossless Audio Codec (в M4A/MP4)"),
             Line::from(""),
             Line::from(vec![Span::styled(
                 "Особенности:",

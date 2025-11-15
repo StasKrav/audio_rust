@@ -9,13 +9,7 @@ clap = { version = "4.0", features = ["derive"] }
 ratatui = "0.23"
 crossterm = "0.27"
 console = "0.15"
-libc = "0.2"  # ← перенесено сюда, убрал дублирование
+libc = "0.2"
 
-# НОВЫЕ ДЕПЕНДЕНСИИ ДЛЯ SYMPHONIA
-symphonia = "0.5"
-symphonia-bundle-flac = "0.5"
-symphonia-bundle-mp3 = "0.5"
-symphonia-codec-vorbis = "0.5"  # ВМЕСТО symphonia-bundle-ogg
-symphonia-format-wav = "0.5"
-symphonia-core = "0.5"
-symphonia-format-isomp4 = "0.5"  # для AAC/M4A
+# ПРАВИЛЬНЫЕ ДЕПЕНДЕНСИИ ДЛЯ SYMPHONIA
+symphonia = { version = "0.5", features = ["aiff", "alac", "flac", "mp3", "vorbis", "wav", "isomp4"] }
