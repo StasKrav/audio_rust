@@ -1834,10 +1834,10 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     // Создаем цветной прогресс-бар с Spans
     let status_line = Line::from(vec![
         Span::raw(status_icon),
-        Span::styled("●".repeat(filled), Style::default().fg(theme::PRIMARY)), // ЗАПОЛНЕННЫЕ - цветные
-        Span::styled("◦".repeat(empty), Style::default().fg(theme::TEXT_DISABLED)), // ПУСТЫЕ - серые
+        Span::styled("■".repeat(filled), Style::default().fg(theme::PRIMARY)), // ЗАПОЛНЕННЫЕ - цветные
+        Span::styled("▫".repeat(empty), Style::default().fg(theme::TEXT_DISABLED)), // ПУСТЫЕ - серые
         Span::raw(format!(
-            " {}/{} | 🔊 {}",
+            " {}/{} | Volume: {}",
             current_time, total_time, volume_text
         )),
     ]);
