@@ -1,3 +1,5 @@
+mod audio_engine;
+use audio_engine::SymphoniaSource;
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -10,7 +12,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, ListState, Paragraph, Clear },
+    widgets::{Block, Clear, ListState, Paragraph},
     Terminal,
 };
 use rodio::{Decoder, OutputStream, Sink};
@@ -21,8 +23,6 @@ use std::io;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-use libc;
 
 // -------- цвета -------
 // Цветовая палитра приложения
@@ -130,18 +130,8 @@ struct PlaylistEntry {
     duration: Option<std::time::Duration>, // Добавляем длительность
 }
 fn get_audio_duration(path: &Path) -> Option<std::time::Duration> {
-    use rodio::{Decoder, Source};
-    use std::fs::File;
-    use std::io::BufReader;
-
-    match File::open(path) {
-        Ok(file) => {
-            if let Ok(source) = Decoder::new(BufReader::new(file)) {
-                source.total_duration()
-            } else {
-                None
-            }
-        }
+    match SymphoniaSource::new(path) {
+        Ok(source) => source.duration(),
         Err(_) => None,
     }
 }
@@ -182,14 +172,19 @@ struct App {
     files_list_state: ListState,
     playlist_list_state: ListState,
     active_panel: usize,
-    _stream: Option<OutputStream>, // Сохраняем stream чтобы он не удалялся
-    sink: Option<Sink>,
+
+    // ЗАМЕНЯЕМ rodio поля на symphonia
+    sink: Option<rodio::Sink>,
+    _stream: Option<OutputStream>,
+
     current_playlist_index: usize,
     is_playing: bool,
     current_playing_path: Option<PathBuf>,
     current_playback_position: std::time::Duration,
     playback_start_time: Option<std::time::Instant>,
     save_dialog: Option<SaveDialog>,
+    show_help: bool,
+    help_scroll: u16,
 }
 #[derive(Default)]
 struct SaveDialog {
@@ -209,20 +204,20 @@ fn parse_m3u_file(path: &Path) -> Result<Vec<PlaylistEntry>, Box<dyn std::error:
 
     for line in content.lines() {
         let line = line.trim();
-        
+
         if line.is_empty() {
             continue;
         }
-        
+
         if line.starts_with("#EXTM3U") {
             continue; // Пропускаем заголовок
         }
-        
+
         if line.starts_with("#EXTINF:") {
             current_extinf = Some(line.to_string());
             continue;
         }
-        
+
         // Это строка с путем к файлу
         if !line.starts_with("#") {
             let file_path = if Path::new(line).is_absolute() {
@@ -230,31 +225,36 @@ fn parse_m3u_file(path: &Path) -> Result<Vec<PlaylistEntry>, Box<dyn std::error:
             } else {
                 base_dir.join(line)
             };
-            
+
             if file_path.exists() {
                 let name = if let Some(extinf) = &current_extinf {
                     // Парсим название из #EXTINF
                     if let Some(comma_pos) = extinf.rfind(',') {
                         extinf[comma_pos + 1..].to_string()
                     } else {
-                        file_path.file_name()
+                        file_path
+                            .file_name()
                             .and_then(|n| n.to_str())
                             .unwrap_or("Unknown")
                             .to_string()
                     }
                 } else {
-                    file_path.file_name()
+                    file_path
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("Unknown")
                         .to_string()
                 };
-                
-                let duration = if file_path.extension().map_or(false, |ext| is_audio_extension(ext)) {
+
+                let duration = if file_path
+                    .extension()
+                    .map_or(false, |ext| is_audio_extension(ext))
+                {
                     get_audio_duration(&file_path)
                 } else {
                     None
                 };
-                
+
                 entries.push(PlaylistEntry {
                     path: file_path,
                     name,
@@ -262,17 +262,17 @@ fn parse_m3u_file(path: &Path) -> Result<Vec<PlaylistEntry>, Box<dyn std::error:
                     duration,
                 });
             }
-            
+
             current_extinf = None;
         }
     }
-    
+
     Ok(entries)
 }
 
 // Вспомогательная функция для проверки аудио расширений
 fn is_audio_extension(ext: &std::ffi::OsStr) -> bool {
-    let audio_extensions = ["wav", "flac", "mp3", "ogg", "m4a", "aac", "dsf", "dff"];
+    let audio_extensions = ["wav", "flac", "ogg", "m4a", "aac", "dsf", "dff"];
     ext.to_str()
         .map(|ext| audio_extensions.contains(&ext.to_lowercase().as_str()))
         .unwrap_or(false)
@@ -324,16 +324,18 @@ impl App {
             files_list_state: ListState::default(),
             playlist_list_state: ListState::default(),
             active_panel: 0,
-            _stream: None,
+            // current_source: None,  // ← НОВОЕ
             sink: None,
+            _stream: None,
             current_playlist_index: 0,
             is_playing: false,
             current_playing_path: None,
             current_playback_position: std::time::Duration::ZERO,
             playback_start_time: None,
-            save_dialog: None, 
+            save_dialog: None,
+            show_help: false,
+            help_scroll: 0,
         };
-
         app.load_directory()?;
 
         // Если был передан файл - добавляем его в плейлист и начинаем воспроизведение
@@ -356,148 +358,227 @@ impl App {
         Ok(app)
     }
 
-    // F1 - Показать справку (заглушка)
-    fn show_help(&self) {
-        // TODO: реализовать модальное окно со справкой
-        println!("📖 Справка будет реализована в модальном окне");
+    // fn rewind_backward(&mut self) {
+    //     // ТОЛЬКО ВИЗУАЛЬНАЯ ПЕРЕМОТКА - не влияет на реальное воспроизведение
+    //     if self.is_playing {
+    //         let new_pos = self.current_playback_position.saturating_sub(Duration::from_secs(10));
+    //         self.current_playback_position = new_pos;
+    //         // ОБНОВЛЯЕМ ВРЕМЯ СТАРТА ДЛЯ КОРРЕКТНОГО ПРОДОЛЖЕНИЯ
+    //         if let Some(start_time) = self.playback_start_time {
+    //             self.playback_start_time = Some(start_time - (self.current_playback_position - new_pos));
+    //         }
+    //     }
+    // }
+    //
+    // fn rewind_forward(&mut self) {
+    //     // ТОЛЬКО ВИЗУАЛЬНАЯ ПЕРЕМОТКА
+    //     if self.is_playing {
+    //         if let Some(total) = self.get_current_track_duration() {
+    //             let new_pos = (self.current_playback_position + Duration::from_secs(10)).min(total);
+    //             self.current_playback_position = new_pos;
+    //             // ОБНОВЛЯЕМ ВРЕМЯ СТАРТА
+    //             if let Some(start_time) = self.playback_start_time {
+    //                 self.playback_start_time = Some(start_time - (self.current_playback_position - new_pos));
+    //             }
+    //         }
+    //     }
+    // }
+
+    // fn restart_playback_from_seek(&mut self, seek_time: Duration, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    //     // Останавливаем текущее воспроизведение
+    //     self.stop();
+    //
+    //     // СОЗДАЕМ ОДИН ИСТОЧНИК И ДЕЛАЕМ SEEK
+    //     let mut source = SymphoniaSource::new(path)?;
+    //     source.seek(seek_time)?;
+    //
+    //     // СОЗДАЕМ RODIO SINK
+    //     let (stream, stream_handle) = OutputStream::try_default()?;
+    //     let sink = Sink::try_new(&stream_handle)?;
+    //
+    //     // ИСПОЛЬЗУЕМ ТОТ ЖЕ ИСТОЧНИК ДЛЯ ВОСПРОИЗВЕДЕНИЯ
+    //     sink.append(source);
+    //     sink.play();
+    //
+    //     // ОБНОВЛЯЕМ СОСТОЯНИЕ - НЕ СОХРАНЯЕМ source отдельно!
+    //     self.current_source = None; // Больше не храним отдельно
+    //     self.sink = Some(sink);
+    //     self._stream = Some(stream);
+    //     self.current_playing_path = Some(path.to_path_buf());
+    //     self.is_playing = true;
+    //     self.current_playback_position = seek_time;
+    //     self.playback_start_time = Some(std::time::Instant::now());
+    //
+    //     self.update_playing_status();
+    //     Ok(())
+    // }
+    //
+    // ОБНОВЛЯЕМ update_playback_progress - ВОЗВРАЩАЕМ РАСЧЕТНОЕ ВРЕМЯ
+    fn update_playback_progress(&mut self) {
+        if self.is_playing {
+            if let Some(start_time) = self.playback_start_time {
+                // РАСЧЕТНОЕ ВРЕМЯ ОТ СТАРТА ВОСПРОИЗВЕДЕНИЯ
+                self.current_playback_position = start_time.elapsed();
+            }
+        }
     }
-	// F9 - Сохранить плейлист
-	fn show_save_dialog(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-	        let current_dir = std::env::current_dir().unwrap_or_default();
-	        let mut dialog = SaveDialog {
-	            visible: true,
-	            filename: "playlist.m3u".to_string(),
-	            cursor_position: 11,
-	            current_dir: current_dir.clone(),
-	            files: Vec::new(),
-	            list_state: ListState::default(),
-	        };
-	        
-	        // Загружаем файлы текущей директории
-	        dialog.load_directory()?;
-	        self.save_dialog = Some(dialog);
-	        Ok(())
-	    }
-	
-	fn hide_save_dialog(&mut self) {
-	    self.save_dialog = None;
-	}
-	
-	fn save_playlist(&self) -> Result<(), Box<dyn std::error::Error>> {
-	    if let Some(dialog) = &self.save_dialog {
-	        let path = if dialog.filename.starts_with('/') || 
-	                     dialog.filename.starts_with('\\') || 
-	                     (dialog.filename.len() > 2 && dialog.filename.chars().nth(1) == Some(':')) {
-	            // Абсолютный путь
-	            PathBuf::from(&dialog.filename)
-	        } else {
-	            // Относительный путь от текущей директории диалога
-	            dialog.current_dir.join(&dialog.filename)
-	        };
-	        
-	        // Создаем директорию если нужно
-	        if let Some(parent) = path.parent() {
-	            std::fs::create_dir_all(parent)?;
-	        }
-	        
-	        let mut content = String::new();
-	        content.push_str("#EXTM3U\n");
-	        
-	        for entry in &self.playlist {
-	            if let Some(duration) = entry.duration {
-	                let seconds = duration.as_secs();
-	                content.push_str(&format!("#EXTINF:{},{}\n", seconds, entry.name));
-	            } else {
-	                content.push_str(&format!("#EXTINF:-1,{}\n", entry.name));
-	            }
-	            content.push_str(&format!("{}\n", entry.path.display()));
-	        }
-	        
-	        std::fs::write(&path, content)?;
-	        // println!("✅ Плейлист сохранен: {}", path.display());
-	    }
-	    Ok(())
-	}
-	
-	// Обработка ввода в диалоге сохранения
-	fn handle_save_dialog_input(&mut self, key: event::KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
-	        if let Some(dialog) = &mut self.save_dialog {
-	            match key.code {
-	                KeyCode::Enter => {
-	                    if let Err(e) = self.save_playlist() {
-	                        eprintln!("Ошибка сохранения: {}", e);
-	                    }
-	                    self.hide_save_dialog();
-	                }
-	                KeyCode::Esc => {
-	                    self.hide_save_dialog();
-	                }
-	                KeyCode::Char(c) => {
-	                    // РАЗРЕШАЕМ ВСЕ СИМВОЛЫ - кириллица будет работать
-	                    dialog.filename.insert(dialog.cursor_position, c);
-	                    dialog.cursor_position += 1;
-	                }
-	                KeyCode::Backspace => {
-	                    if dialog.cursor_position > 0 {
-	                        dialog.cursor_position -= 1;
-	                        dialog.filename.remove(dialog.cursor_position);
-	                    }
-	                }
-	                KeyCode::Left => {
-	                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-	                        // Ctrl+Left - переход в родительскую директорию
-	                        if let Some(parent) = dialog.current_dir.parent() {
-	                            dialog.current_dir = parent.to_path_buf();
-	                            dialog.load_directory()?;
-	                        }
-	                    } else {
-	                        // Обычный Left
-	                        if dialog.cursor_position > 0 {
-	                            dialog.cursor_position -= 1;
-	                        }
-	                    }
-	                }
-	                KeyCode::Right => {
-	                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-	                        // Ctrl+Right - вход в директорию
-	                        dialog.enter_directory()?;
-	                    } else {
-	                        // Обычный Right
-	                        if dialog.cursor_position < dialog.filename.len() {
-	                            dialog.cursor_position += 1;
-	                        }
-	                    }
-	                }
-	                KeyCode::Home => {
-	                    dialog.cursor_position = 0;
-	                }
-	                KeyCode::End => {
-	                    dialog.cursor_position = dialog.filename.len();
-	                }
-	                KeyCode::Down => {
-	                    // Навигация по файлам
-	                    if let Some(selected) = dialog.list_state.selected() {
-	                        if selected < dialog.files.len() - 1 {
-	                            dialog.list_state.select(Some(selected + 1));
-	                        }
-	                    } else if !dialog.files.is_empty() {
-	                        dialog.list_state.select(Some(0));
-	                    }
-	                }
-	                KeyCode::Up => {
-	                    // Навигация по файлам
-	                    if let Some(selected) = dialog.list_state.selected() {
-	                        if selected > 0 {
-	                            dialog.list_state.select(Some(selected - 1));
-	                        }
-	                    }
-	                }
-	                _ => {}
-	            }
-	        }
-	        Ok(())
-	    }
-	
+    //
+    // // УПРОЩАЕМ get_current_track_duration
+    // fn get_current_track_duration(&self) -> Option<Duration> {
+    //     if let Some(current_path) = &self.current_playing_path {
+    //         SymphoniaSource::new(current_path).ok()?.duration()
+    //     } else {
+    //         None
+    //     }
+    // }
+
+    // F1 - Показать справку (заглушка)
+    fn show_help(&mut self) {
+        self.show_help = !self.show_help;
+        self.help_scroll = 0; // Сбрасываем скролл при открытии
+    }
+    // F9 - Сохранить плейлист
+    fn show_save_dialog(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let current_dir = std::env::current_dir().unwrap_or_default();
+        let mut dialog = SaveDialog {
+            visible: true,
+            filename: "playlist.m3u".to_string(),
+            cursor_position: 11,
+            current_dir: current_dir.clone(),
+            files: Vec::new(),
+            list_state: ListState::default(),
+        };
+
+        // Загружаем файлы текущей директории
+        dialog.load_directory()?;
+        self.save_dialog = Some(dialog);
+        Ok(())
+    }
+
+    fn hide_save_dialog(&mut self) {
+        self.save_dialog = None;
+    }
+
+    fn save_playlist(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(dialog) = &self.save_dialog {
+            let path = if dialog.filename.starts_with('/')
+                || dialog.filename.starts_with('\\')
+                || (dialog.filename.len() > 2 && dialog.filename.chars().nth(1) == Some(':'))
+            {
+                // Абсолютный путь
+                PathBuf::from(&dialog.filename)
+            } else {
+                // Относительный путь от текущей директории диалога
+                dialog.current_dir.join(&dialog.filename)
+            };
+
+            // Создаем директорию если нужно
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            let mut content = String::new();
+            content.push_str("#EXTM3U\n");
+
+            for entry in &self.playlist {
+                if let Some(duration) = entry.duration {
+                    let seconds = duration.as_secs();
+                    content.push_str(&format!("#EXTINF:{},{}\n", seconds, entry.name));
+                } else {
+                    content.push_str(&format!("#EXTINF:-1,{}\n", entry.name));
+                }
+                content.push_str(&format!("{}\n", entry.path.display()));
+            }
+
+            std::fs::write(&path, content)?;
+            // println!("✅ Плейлист сохранен: {}", path.display());
+        }
+        Ok(())
+    }
+
+    // Обработка ввода в диалоге сохранения
+    fn handle_save_dialog_input(
+        &mut self,
+        key: event::KeyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(dialog) = &mut self.save_dialog {
+            match key.code {
+                KeyCode::Enter => {
+                    if let Err(e) = self.save_playlist() {
+                        eprintln!("Ошибка сохранения: {}", e);
+                    }
+                    self.hide_save_dialog();
+                }
+                KeyCode::Esc => {
+                    self.hide_save_dialog();
+                }
+                KeyCode::Char(c) => {
+                    // РАЗРЕШАЕМ ВСЕ СИМВОЛЫ - кириллица будет работать
+                    dialog.filename.insert(dialog.cursor_position, c);
+                    dialog.cursor_position += 1;
+                }
+                KeyCode::Backspace => {
+                    if dialog.cursor_position > 0 {
+                        dialog.cursor_position -= 1;
+                        dialog.filename.remove(dialog.cursor_position);
+                    }
+                }
+                KeyCode::Left => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        // Ctrl+Left - переход в родительскую директорию
+                        if let Some(parent) = dialog.current_dir.parent() {
+                            dialog.current_dir = parent.to_path_buf();
+                            dialog.load_directory()?;
+                        }
+                    } else {
+                        // Обычный Left
+                        if dialog.cursor_position > 0 {
+                            dialog.cursor_position -= 1;
+                        }
+                    }
+                }
+                KeyCode::Right => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                        // Ctrl+Right - вход в директорию
+                        dialog.enter_directory()?;
+                    } else {
+                        // Обычный Right
+                        if dialog.cursor_position < dialog.filename.len() {
+                            dialog.cursor_position += 1;
+                        }
+                    }
+                }
+
+                KeyCode::Home => {
+                    dialog.cursor_position = 0;
+                }
+                KeyCode::End => {
+                    dialog.cursor_position = dialog.filename.len();
+                }
+                KeyCode::Down => {
+                    // Навигация по файлам
+                    if let Some(selected) = dialog.list_state.selected() {
+                        if selected < dialog.files.len() - 1 {
+                            dialog.list_state.select(Some(selected + 1));
+                        }
+                    } else if !dialog.files.is_empty() {
+                        dialog.list_state.select(Some(0));
+                    }
+                }
+                KeyCode::Up => {
+                    // Навигация по файлам
+                    if let Some(selected) = dialog.list_state.selected() {
+                        if selected > 0 {
+                            dialog.list_state.select(Some(selected - 1));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     // F2 - Play
     fn play(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Если на паузе - продолжаем
@@ -518,50 +599,42 @@ impl App {
 
     // F3 - Pause/Unpause
     // ОБНОВЛЯЕМ ПРОГРЕСС В pause()
-        fn pause(&mut self) {
-            if let Some(sink) = &self.sink {
-                if sink.is_paused() {
-                    sink.play();
-                    self.is_playing = true;
-                    // ВОССТАНАВЛИВАЕМ ВРЕМЯ ПРИ СНЯТИИ ПАУЗЫ
-                    if self.playback_start_time.is_none() {
-                        self.playback_start_time = Some(std::time::Instant::now() - self.current_playback_position);
-                    }
-                } else {
-                    sink.pause();
-                    self.is_playing = false;
-                    // СОХРАНЯЕМ ПОЗИЦИЮ ПРИ ПАУЗЕ
-                    if let Some(_start_time) = self.playback_start_time {  // ← добавляем _
-                        self.current_playback_position = _start_time.elapsed();
-                        self.playback_start_time = None;
-                    }
+    fn pause(&mut self) {
+        if let Some(sink) = &self.sink {
+            if sink.is_paused() {
+                sink.play();
+                self.is_playing = true;
+                // ВОССТАНАВЛИВАЕМ ВРЕМЯ ПРИ СНЯТИИ ПАУЗЫ
+                if self.playback_start_time.is_none() {
+                    self.playback_start_time =
+                        Some(std::time::Instant::now() - self.current_playback_position);
+                }
+            } else {
+                sink.pause();
+                self.is_playing = false;
+                // СОХРАНЯЕМ ПОЗИЦИЮ ПРИ ПАУЗЕ
+                if let Some(_start_time) = self.playback_start_time {
+                    // ← добавляем _
+                    self.current_playback_position = _start_time.elapsed();
+                    self.playback_start_time = None;
                 }
             }
         }
-    
+    }
 
     // F4 - Stop
     // ОБНОВЛЯЕМ ПРОГРЕСС В stop()
-        fn stop(&mut self) {
-            if let Some(sink) = &self.sink {
-                sink.stop();
-            }
-            self.sink = None;
-            self._stream = None;
-            self.is_playing = false;
-            self.current_playing_path = None;
-            self.current_playback_position = std::time::Duration::ZERO; // СБРОС
-            self.playback_start_time = None; // СБРОС
-            self.update_playing_status();
+    fn stop(&mut self) {
+        if let Some(sink) = &self.sink {
+            sink.stop();
         }
-    // F7 - Перемотка назад на 10 секунд (заглушка)
-    fn rewind_backward(&mut self) {
-        // println!("⏪ Перемотка назад на 10 сек (реализуется позже)");
-    }
-
-    // F8 - Перемотка вперед на 10 секунд (заглушка)
-    fn rewind_forward(&mut self) {
-        // println!("⏩ Перемотка вперед на 10 сек (реализуется позже)");
+        self.sink = None;
+        self._stream = None;
+        self.is_playing = false;
+        self.current_playing_path = None;
+        self.current_playback_position = std::time::Duration::ZERO;
+        self.playback_start_time = None;
+        self.update_playing_status();
     }
 
     fn load_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -596,7 +669,8 @@ impl App {
                         selected: false,
                         duration: None,
                     });
-                } else if is_audio_file(&path) || path.extension().map_or(false, |ext| ext == "m3u") {
+                } else if is_audio_file(&path) || path.extension().map_or(false, |ext| ext == "m3u")
+                {
                     let duration = if path.extension().map_or(false, |ext| ext == "m3u") {
                         None // У m3u файлов нет длительности
                     } else {
@@ -706,7 +780,7 @@ impl App {
                 .filter(|entry| entry.selected && !entry.is_dir)
                 .cloned()
                 .collect();
-    
+
             for file in selected_files {
                 if file.path.extension().map_or(false, |ext| ext == "m3u") {
                     // Если это M3U файл - парсим его
@@ -724,7 +798,7 @@ impl App {
                     });
                 }
             }
-    
+
             // Снимаем выделение после перемещения
             for entry in &mut self.files {
                 entry.selected = false;
@@ -827,12 +901,8 @@ impl App {
 
     // Переименовываем старый метод play в start_playback
     fn start_playback(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Останавливаем текущее воспроизведение
-        if let Some(sink) = &self.sink {
-            sink.stop();
-        }
+        self.stop();
 
-        // Определяем какой файл воспроизводить
         let file_to_play = match self.active_panel {
             0 => {
                 if let Some(selected) = self.files_list_state.selected() {
@@ -855,25 +925,24 @@ impl App {
         };
 
         if let Some(path) = file_to_play {
-            // Сохраняем путь текущего играющего файла
-            self.current_playing_path = Some(path.clone());
+            // СОЗДАЕМ ИСТОЧНИК
+            let source = SymphoniaSource::new(&path)?;
 
-            // Создаем аудио-плеер
+            // СОЗДАЕМ RODIO SINK
             let (stream, stream_handle) = OutputStream::try_default()?;
             let sink = Sink::try_new(&stream_handle)?;
 
-            let file = File::open(&path)?;
-            let source = Decoder::new(BufReader::new(file))?;
             sink.append(source);
             sink.play();
 
-            self._stream = Some(stream);
+            // ОБНОВЛЯЕМ СОСТОЯНИЕ
             self.sink = Some(sink);
+            self._stream = Some(stream);
+            self.current_playing_path = Some(path);
             self.is_playing = true;
-
-            self.update_playing_status();
             self.current_playback_position = std::time::Duration::ZERO;
             self.playback_start_time = Some(std::time::Instant::now());
+
             self.update_playing_status();
         }
 
@@ -888,42 +957,42 @@ impl App {
     fn previous_track(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.current_playlist_index > 0 {
             self.current_playlist_index -= 1;
-    
+
             if let Some(sink) = &self.sink {
                 sink.stop();
             }
-    
+
             let files_to_play: Vec<PathBuf> = self
                 .playlist
                 .iter()
                 .map(|entry| entry.path.clone())
                 .collect();
-    
+
             if self.current_playlist_index < files_to_play.len() {
                 if let Some(prev_file) = files_to_play.get(self.current_playlist_index) {
                     self.current_playing_path = Some(prev_file.clone());
-    
+
                     let file = File::open(prev_file)?;
                     let source = Decoder::new(BufReader::new(file))?;
-    
+
                     let (stream, stream_handle) = OutputStream::try_default()?;
                     let sink = Sink::try_new(&stream_handle)?;
                     sink.append(source);
                     sink.play();
-    
+
                     self._stream = Some(stream);
                     self.sink = Some(sink);
                     self.is_playing = true;
-    
+
                     // СБРАСЫВАЕМ И ЗАПУСКАЕМ ПРОГРЕСС ДЛЯ ПРЕДЫДУЩЕГО ТРЕКА
                     self.current_playback_position = std::time::Duration::ZERO;
                     self.playback_start_time = Some(std::time::Instant::now());
-    
+
                     self.update_playing_status();
                 }
             }
         }
-    
+
         Ok(())
     }
 
@@ -948,16 +1017,16 @@ impl App {
         if let Some(sink) = &self.sink {
             sink.stop();
         }
-    
+
         self.current_playlist_index += 1;
-    
+
         // Определяем следующий файл для воспроизведения
         let files_to_play: Vec<PathBuf> = self
             .playlist
             .iter()
             .map(|entry| entry.path.clone())
             .collect();
-    
+
         // Проверяем есть ли еще треки
         if self.current_playlist_index >= files_to_play.len() {
             self.is_playing = false;
@@ -969,63 +1038,59 @@ impl App {
             self.update_playing_status();
             return Ok(());
         }
-    
+
         // Воспроизводим следующий трек
         if let Some(next_file) = files_to_play.get(self.current_playlist_index) {
             self.current_playing_path = Some(next_file.clone());
-    
+
             let file = File::open(next_file)?;
             let source = Decoder::new(BufReader::new(file))?;
-    
+
             let (stream, stream_handle) = OutputStream::try_default()?;
             let sink = Sink::try_new(&stream_handle)?;
             sink.append(source);
             sink.play();
-    
+
             self._stream = Some(stream);
             self.sink = Some(sink);
             self.is_playing = true;
-    
+
             // СБРАСЫВАЕМ И ЗАПУСКАЕМ ПРОГРЕСС ДЛЯ НОВОГО ТРЕКА
             self.current_playback_position = std::time::Duration::ZERO;
             self.playback_start_time = Some(std::time::Instant::now());
-    
+
             self.update_playing_status();
         }
-    
+
         Ok(())
     }
 
-    fn update_playback_progress(&mut self) {
-            if let (Some(start_time), true) = (self.playback_start_time, self.is_playing) {
-                self.current_playback_position = start_time.elapsed();
-            }
-        }
-    
-        fn check_playback_finished(&mut self) {
-            if let Some(sink) = &self.sink {
-                if sink.empty() && self.is_playing {
-                    // СБРАСЫВАЕМ ПРОГРЕСС ПРИ ЗАВЕРШЕНИИ
-                    self.current_playback_position = std::time::Duration::ZERO;
-                    self.playback_start_time = None;
-                    
-                    if let Err(_e) = self.play_next() {  // ← добавляем _
-                        self.is_playing = false;
-                        self.update_playing_status();
-                    }
+    fn check_playback_finished(&mut self) {
+        if let Some(sink) = &self.sink {
+            if sink.empty() && self.is_playing {
+                self.current_playback_position = std::time::Duration::ZERO;
+                self.playback_start_time = None;
+
+                if let Err(_e) = self.play_next() {
+                    self.is_playing = false;
+                    self.update_playing_status();
                 }
             }
         }
+    }
 }
 impl SaveDialog {
     fn load_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.files.clear();
 
-        
         let entries = match fs::read_dir(&self.current_dir) {
             Ok(entries) => entries,
             Err(e) => {
-                eprintln!("Ошибка чтения директории {}: {}", self.current_dir.display(), e);
+                eprintln!(
+                    "Ошибка чтения директории {}: {}",
+                    self.current_dir.display(),
+                    e
+                );
                 return Ok(()); // Возвращаемся без ошибки, чтобы не падать
             }
         };
@@ -1038,9 +1103,9 @@ impl SaveDialog {
                 Ok(entry) => entry,
                 Err(_) => continue, // Пропускаем проблемные файлы
             };
-            
+
             let path = entry.path();
-            
+
             // Безопасное получение имени файла
             let name = match path.file_name().and_then(|n| n.to_str()) {
                 Some(file_name) => {
@@ -1058,7 +1123,7 @@ impl SaveDialog {
             };
 
             let is_dir = path.is_dir();
-            
+
             if is_dir {
                 dirs.push(FileEntry {
                     path: path.clone(),
@@ -1092,7 +1157,7 @@ impl SaveDialog {
 
         Ok(())
     }
-    
+
     fn enter_directory(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(selected) = self.list_state.selected() {
             if let Some(entry) = self.files.get(selected) {
@@ -1105,18 +1170,16 @@ impl SaveDialog {
                             self.current_dir = parent.to_path_buf();
                         }
                     }
-                   
-                   
                 }
             }
         }
         Ok(())
     }
-    
-    
 } // <-- Закрывающая фигурная скобка для impl SaveDialog
 fn is_audio_file(path: &Path) -> bool {
-    let audio_extensions = ["wav", "flac", "mp3", "ogg", "m4a", "aac", "dsf", "dff", "m3u"];
+    let audio_extensions = [
+        "wav", "flac", "ogg", "m4a", "aac", "dsf", "dff", "m3u",
+    ];
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| audio_extensions.contains(&ext.to_lowercase().as_str()))
@@ -1143,7 +1206,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-	suppress_alsa_warnings();
+    suppress_alsa_warnings();
     // Увеличиваем размер аудиобуфера для предотвращения underrun
     env::set_var("RUST_AUDIO_BACKEND_BUFFER_SIZE", "8192");
     env::set_var("RUST_AUDIO_LATENCY", "1");
@@ -1161,37 +1224,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Главный цикл
     'main: loop {
-    	// ОБНОВЛЯЕМ ПРОГРЕСС ВОСПРОИЗВЕДЕНИЯ
-    	app.update_playback_progress();
+        // ОБНОВЛЯЕМ ПРОГРЕСС ВОСПРОИЗВЕДЕНИЯ
+        app.update_playback_progress();
         // Проверяем окончание воспроизведения
         app.check_playback_finished();
 
         // Отрисовываем интерфейс
         terminal.draw(|f| ui(f, &app))?;
 
-          // ★★★ ОБРАБОТКА ДИАЛОГА ★★★
-    // В главном цикле, где обрабатывается диалог:
-    // В главном цикле, где обрабатывается диалог:
-    if let Some(dialog) = &app.save_dialog {
-        if dialog.visible {
-            match event::read()? {
-                Event::Key(key) => {
-                    if let Err(e) = app.handle_save_dialog_input(key) {
-                        eprintln!("Ошибка в диалоге сохранения: {}", e);
-                        // Не закрываем приложение при ошибке, просто логируем
+        // ★★★ ОБРАБОТКА ДИАЛОГА ★★★
+        // В главном цикле, где обрабатывается диалог:
+        // В главном цикле, где обрабатывается диалог:
+        if let Some(dialog) = &app.save_dialog {
+            if dialog.visible {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if let Err(e) = app.handle_save_dialog_input(key) {
+                            eprintln!("Ошибка в диалоге сохранения: {}", e);
+                            // Не закрываем приложение при ошибке, просто логируем
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
+                continue;
             }
-            continue;
         }
-    }
-        
-             // Обрабатываем ввод
+
+        // Обрабатываем ввод
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    // В main loop, в match key.code { ... }:
+                    _ if app.show_help => {
+                        match key.code {
+                            KeyCode::Esc => app.show_help = false,
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.help_scroll = app.help_scroll.saturating_add(1);
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.help_scroll = app.help_scroll.saturating_sub(1);
+                            }
+                            KeyCode::PageDown => {
+                                app.help_scroll = app.help_scroll.saturating_add(10);
+                            }
+                            KeyCode::PageUp => {
+                                app.help_scroll = app.help_scroll.saturating_sub(10);
+                            }
+                            KeyCode::Home => {
+                                app.help_scroll = 0;
+                            }
+                            KeyCode::End => {
+                                app.help_scroll = u16::MAX;
+                            }
+                            _ => {} // Игнорируем другие клавиши в справке
+                        }
+                    }
 
                     // Группа 1: Основное управление (F1-F4)
                     KeyCode::F(1) => app.show_help(),
@@ -1214,8 +1300,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             eprintln!("Ошибка переключения трека: {}", e);
                         }
                     }
-                    KeyCode::F(7) => app.rewind_backward(),
-                    KeyCode::F(8) => app.rewind_forward(),
+                    // KeyCode::F(7) => {
+                    //     if let Err(e) = app.rewind_backward() {
+                    //         eprintln!("Ошибка перемотки назад: {}", e);
+                    //     }
+                    // }
+                    // KeyCode::F(8) => {
+                    //     if let Err(e) = app.rewind_forward() {
+                    //         eprintln!("Ошибка перемотки вперед: {}", e);
+                    //     }
+                    // }
                     KeyCode::Char('q') | KeyCode::Esc => break 'main,
                     KeyCode::Tab => app.switch_panel(),
                     KeyCode::F(9) => {
@@ -1261,6 +1355,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Left => {
                         if let Err(e) = app.leave_directory() {
                             eprintln!("Ошибка: {}", e);
+                        }
+                    }
+
+                    // В match key.code { ... } добавь:
+                    KeyCode::Esc => {
+                        if app.show_help {
+                            app.show_help = false; // Закрыть справку по Esc
+                        } else {
+                            break 'main; // Выйти из приложения
                         }
                     }
 
@@ -1317,9 +1420,9 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
             Constraint::Min(1),    // Список файлов
         ])
         .split(columns[0]);
-	// Рендерим диалог сохранения поверх основного интерфейса
-	// Рендерим диалог сохранения поверх основного интерфейса
-	
+    // Рендерим диалог сохранения поверх основного интерфейса
+    // Рендерим диалог сохранения поверх основного интерфейса
+
     // Рендерим заголовок файлового менеджера
     let files_title_style = if app.active_panel == 0 {
         active_panel()
@@ -1328,7 +1431,7 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     };
 
     let files_title = Paragraph::new(Line::from(Span::styled(
-        " ФАЙЛОВЫЙ МЕНЕДЖЕР ",
+        " FILE MANAGER ",
         files_title_style,
     )))
     .style(surface());
@@ -1473,7 +1576,7 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     };
 
     let playlist_title =
-        Paragraph::new(Line::from(Span::styled(" ПЛЕЙЛИСТ ", playlist_title_style)))
+        Paragraph::new(Line::from(Span::styled(" PLAYLIST ", playlist_title_style)))
             .style(styles::surface());
     frame.render_widget(playlist_title, playlist_chunks[0]);
 
@@ -1650,7 +1753,7 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         ])
         .split(chunks[2]);
 
-   // Левая часть - текущий трек и управление плейлистом
+    // Левая часть - текущий трек и управление плейлистом
     let left_status_text = if let Some(current_path) = &app.current_playing_path {
         if let Some(file_name) = current_path.file_name().and_then(|n| n.to_str()) {
             // Обрезаем длинные названия
@@ -1666,7 +1769,7 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     } else {
         " No track ".to_string()
     };
-    
+
     let left_status_paragraph = Paragraph::new(Line::from(vec![
         Span::styled(
             &left_status_text,
@@ -1682,40 +1785,42 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
         ),
     ]))
     .style(styles::surface());
-    
+
     frame.render_widget(left_status_paragraph, status_chunks[0]);
 
     // Правая часть - состояние воспроизведения
     // В функции ui(), заменяем текущую status_text на:
-    
+
     // Получаем общую длительность текущего трека
     // В функции ui(), заменяем весь блок прогресс-бара на:
-    
+
     // Получаем общую длительность текущего трека
     let total_duration = if let Some(current_path) = &app.current_playing_path {
         get_audio_duration(current_path)
     } else {
         None
     };
-    
+
     // Создаем прогресс-бар
-    let (filled, empty, current_time, total_time) = if let (Some(total), Some(current)) = (total_duration, Some(app.current_playback_position)) {
+    let (filled, empty, current_time, total_time) = if let (Some(total), Some(current)) =
+        (total_duration, Some(app.current_playback_position))
+    {
         let progress_ratio = if total.as_secs() > 0 {
             current.as_secs_f64() / total.as_secs_f64()
         } else {
             0.0
         };
-        
+
         let progress_ratio = progress_ratio.min(1.0);
         let bar_width = 20;
         let filled = (progress_ratio * bar_width as f64).round() as usize;
         let empty = bar_width - filled;
-        
+
         (filled, empty, format_time(current), format_time(total))
     } else {
         (0, 20, "--:--".to_string(), "--:--".to_string())
     };
-    
+
     // Объединяем с информацией о состоянии
     let status_icon = if let Some(sink) = &app.sink {
         if sink.is_paused() {
@@ -1728,184 +1833,410 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
     } else {
         "⏹ "
     };
-    
+
     let volume_text = if let Some(sink) = &app.sink {
         format!("{:.0}%", sink.volume() * 100.0)
     } else {
         "100%".to_string()
     };
-    
+
     // Создаем цветной прогресс-бар с Spans
     let status_line = Line::from(vec![
         Span::raw(status_icon),
-        Span::styled("●".repeat(filled), Style::default().fg(theme::PRIMARY)),  // ЗАПОЛНЕННЫЕ - цветные
-        Span::styled("◦".repeat(empty), Style::default().fg(theme::TEXT_DISABLED)),  // ПУСТЫЕ - серые
-        Span::raw(format!(" {}/{} | 🔊 {}", current_time, total_time, volume_text)),
+        Span::styled("●".repeat(filled), Style::default().fg(theme::PRIMARY)), // ЗАПОЛНЕННЫЕ - цветные
+        Span::styled("◦".repeat(empty), Style::default().fg(theme::TEXT_DISABLED)), // ПУСТЫЕ - серые
+        Span::raw(format!(
+            " {}/{} | 🔊 {}",
+            current_time, total_time, volume_text
+        )),
     ]);
-    
+
     let status_paragraph = Paragraph::new(status_line)
         .style(styles::surface())
         .alignment(ratatui::layout::Alignment::Right);
 
     frame.render_widget(status_paragraph, status_chunks[1]);
 
-// ------------ диалоговое окно ---------------------------
-if let Some(dialog) = &app.save_dialog {
-    if dialog.visible {
-        let overlay = Rect::new(0, 0, frame.size().width, frame.size().height);
-        
-        // 1. Очищаем область
-        frame.render_widget(Clear, overlay);
-        
-        // 2. Рисуем непрозрачный фон
-        let background = Block::default()
-            .style(Style::default().bg(theme::BACKGROUND));
-        frame.render_widget(background, overlay);
-        
-        // 3. Рисуем диалог
-        let dialog_area = centered_rect(70, 60, frame.size());
-        let dialog_block = Block::default()
-            .style(styles::active_panel())
-            .borders(ratatui::widgets::Borders::NONE)
+    // ------------ диалоговое окно ---------------------------
+    if let Some(dialog) = &app.save_dialog {
+        if dialog.visible {
+            let overlay = Rect::new(0, 0, frame.size().width, frame.size().height);
+
+            // 1. Очищаем область
+            frame.render_widget(Clear, overlay);
+
+            // 2. Рисуем непрозрачный фон
+            let background = Block::default().style(Style::default().bg(theme::BACKGROUND));
+            frame.render_widget(background, overlay);
+
+            // 3. Рисуем диалог
+            let dialog_area = centered_rect(70, 60, frame.size());
+            let dialog_block = Block::default()
+                .style(styles::active_panel())
+                .borders(ratatui::widgets::Borders::NONE)
+                .border_style(styles::active_panel())
+                .title(" Save Playlist ");
+            frame.render_widget(dialog_block, dialog_area);
+
+            let inner_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(1)
+                .constraints([
+                    Constraint::Length(1), // [0] Текущий путь
+                    Constraint::Length(3), // [1] Поле ввода
+                    Constraint::Min(10),   // [2] Список файлов
+                    Constraint::Length(1), // [3] ПУСТАЯ СТРОКА-РАЗДЕЛИТЕЛЬ
+                    Constraint::Length(1), // [4] Подсказки
+                ])
+                .split(dialog_area);
+
+            // Текущий путь
+            let path_text = Paragraph::new(format!("Path: {}", dialog.current_dir.display()))
+                .style(Style::default().fg(theme::TEXT_DISABLED));
+            frame.render_widget(path_text, inner_chunks[0]);
+
+            // Поле ввода с курсором
+            let input_area = inner_chunks[1];
+
+            // Создаем текст с видимым курсором
+            let input_text = {
+                let mut spans = Vec::new();
+                let chars: Vec<char> = dialog.filename.chars().collect();
+
+                // Добавляем текст до курсора
+                if dialog.cursor_position > 0 {
+                    spans.push(Span::styled(
+                        chars[..dialog.cursor_position].iter().collect::<String>(),
+                        Style::default().fg(theme::SUCCESS),
+                    ));
+                }
+
+                // Добавляем курсор (инвертированный символ)
+                if dialog.cursor_position < chars.len() {
+                    spans.push(Span::styled(
+                        chars[dialog.cursor_position].to_string(),
+                        Style::default().fg(theme::BACKGROUND).bg(theme::SUCCESS),
+                    ));
+
+                    // Добавляем оставшийся текст
+                    if dialog.cursor_position < chars.len() - 1 {
+                        spans.push(Span::styled(
+                            chars[dialog.cursor_position + 1..]
+                                .iter()
+                                .collect::<String>(),
+                            Style::default().fg(theme::TEXT_PRIMARY),
+                        ));
+                    }
+                } else {
+                    // Курсор в конце - добавляем пробел с инвертированным стилем
+                    spans.push(Span::styled(
+                        " ",
+                        Style::default()
+                            .fg(theme::BACKGROUND)
+                            .bg(theme::TEXT_PRIMARY),
+                    ));
+                }
+
+                Line::from(spans)
+            };
+
+            let input = Paragraph::new(input_text).style(styles::surface()).block(
+                Block::default()
+                    .borders(ratatui::widgets::Borders::NONE)
+                    .title("File name "),
+            );
+            frame.render_widget(input, input_area);
+
+            // СПИСОК ФАЙЛОВ С ПРАВИЛЬНЫМ СКРОЛЛИНГОМ
+            let files_area = inner_chunks[2];
+            let mut y = 0;
+
+            // ВЫЧИСЛЯЕМ СКРОЛЛ ДИНАМИЧЕСКИ (как в основном интерфейсе)
+            let scroll_offset = if let Some(selected) = dialog.list_state.selected() {
+                let visible_items = files_area.height as usize;
+                if selected >= visible_items {
+                    selected - visible_items + 1
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            // Рендерим только видимые элементы
+            for (i, entry) in dialog.files.iter().enumerate().skip(scroll_offset) {
+                if y >= files_area.height as usize {
+                    break;
+                }
+
+                // Вычисляем оригинальный индекс для подсветки
+                let original_index = i;
+
+                let style = if Some(original_index) == dialog.list_state.selected() {
+                    Style::default()
+                        .fg(theme::TEXT_PRIMARY)
+                        .add_modifier(Modifier::BOLD)
+                } else if entry.is_dir {
+                    styles::folder()
+                } else {
+                    styles::normal_file()
+                };
+
+                let line_rect =
+                    Rect::new(files_area.x, files_area.y + y as u16, files_area.width, 1);
+                let name_paragraph = Paragraph::new(Line::from(Span::styled(&entry.name, style)))
+                    .style(styles::surface());
+                frame.render_widget(name_paragraph, line_rect);
+
+                y += 1;
+            }
+
+            // ПОДСВЕТКА ВЫБРАННОГО ЭЛЕМЕНТА (только если он видим)
+            if let Some(selected) = dialog.list_state.selected() {
+                if selected >= scroll_offset
+                    && (selected - scroll_offset) < files_area.height as usize
+                {
+                    let highlight_y = (selected - scroll_offset) as u16;
+                    let highlight_rect = Rect::new(
+                        files_area.x,
+                        files_area.y + highlight_y,
+                        files_area.width,
+                        1,
+                    );
+                    let highlight = Paragraph::new("").style(Style::default().bg(theme::SELECTED));
+                    frame.render_widget(highlight, highlight_rect);
+                }
+            }
+            // ПУСТАЯ СТРОКА-РАЗДЕЛИТЕЛЬ
+            let separator_area = inner_chunks[3];
+            let separator = Paragraph::new("").style(styles::surface());
+            frame.render_widget(separator, separator_area);
+
+            // Подсказки
+            let hints = Paragraph::new(Line::from(vec![
+                Span::styled("Enter: Save  ", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled(" Esc: Cancel  ", Style::default().fg(theme::TEXT_SECONDARY)),
+                Span::styled(
+                    " Ctrl+←/→: Navigate ",
+                    Style::default().fg(theme::TEXT_SECONDARY),
+                ),
+            ]));
+            frame.render_widget(hints, inner_chunks[4]);
+        }
+    }
+    // РЕНДЕРИМ СПРАВКУ ЕСЛИ ОНА ВКЛЮЧЕНА
+    if app.show_help {
+        let help_area = centered_rect(60, 70, frame.size());
+
+        frame.render_widget(Clear, help_area);
+
+        let help_block = Block::default()
+            .style(styles::surface())
+            .borders(ratatui::widgets::Borders::ALL)
             .border_style(styles::active_panel())
-            .title(" Save Playlist ");
-        frame.render_widget(dialog_block, dialog_area);
-        
+            .title(" Справка Hi-Res Player ");
+        frame.render_widget(help_block, help_area);
+
         let inner_chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
             .constraints([
-                Constraint::Length(1), // [0] Текущий путь
-                Constraint::Length(3), // [1] Поле ввода  
-                Constraint::Min(10),   // [2] Список файлов
-                Constraint::Length(1), // [3] ПУСТАЯ СТРОКА-РАЗДЕЛИТЕЛЬ
-                Constraint::Length(1), // [4] Подсказки
+                Constraint::Min(1),    // Текст справки со скроллом
+                Constraint::Length(1), // Подсказка
             ])
-            .split(dialog_area);
-        
-        // Текущий путь
-        let path_text = Paragraph::new(format!("Path: {}", dialog.current_dir.display()))
-            .style(Style::default().fg(theme::TEXT_DISABLED));
-        frame.render_widget(path_text, inner_chunks[0]);
-        
-        // Поле ввода с курсором
-        let input_area = inner_chunks[1];
-        
-        // Создаем текст с видимым курсором
-        let input_text = {
-            let mut spans = Vec::new();
-            let chars: Vec<char> = dialog.filename.chars().collect();
-            
-            // Добавляем текст до курсора
-            if dialog.cursor_position > 0 {
-                spans.push(Span::styled(
-                    chars[..dialog.cursor_position].iter().collect::<String>(),
-                    Style::default().fg(theme::SUCCESS)
-                ));
-            }
-            
-            // Добавляем курсор (инвертированный символ)
-            if dialog.cursor_position < chars.len() {
-                spans.push(Span::styled(
-                    chars[dialog.cursor_position].to_string(),
-                    Style::default().fg(theme::BACKGROUND).bg(theme::SUCCESS)
-                ));
-                
-                // Добавляем оставшийся текст
-                if dialog.cursor_position < chars.len() - 1 {
-                    spans.push(Span::styled(
-                        chars[dialog.cursor_position + 1..].iter().collect::<String>(),
-                        Style::default().fg(theme::TEXT_PRIMARY)
-                    ));
-                }
-            } else {
-                // Курсор в конце - добавляем пробел с инвертированным стилем
-                spans.push(Span::styled(
-                    " ",
-                    Style::default().fg(theme::BACKGROUND).bg(theme::TEXT_PRIMARY)
-                ));
-            }
-            
-            Line::from(spans)
-        };
+            .split(help_area);
 
-        let input = Paragraph::new(input_text)
-            .style(styles::surface())
-            .block(Block::default()
-                .borders(ratatui::widgets::Borders::NONE)
-                .title("File name "));
-        frame.render_widget(input, input_area);
-        
-        // СПИСОК ФАЙЛОВ С ПРАВИЛЬНЫМ СКРОЛЛИНГОМ
-        let files_area = inner_chunks[2];
-        let mut y = 0;
-
-        // ВЫЧИСЛЯЕМ СКРОЛЛ ДИНАМИЧЕСКИ (как в основном интерфейсе)
-        let scroll_offset = if let Some(selected) = dialog.list_state.selected() {
-            let visible_items = files_area.height as usize;
-            if selected >= visible_items {
-                selected - visible_items + 1
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
-        // Рендерим только видимые элементы
-        for (i, entry) in dialog.files.iter().enumerate().skip(scroll_offset) {
-            if y >= files_area.height as usize {
-                break;
-            }
-            
-            // Вычисляем оригинальный индекс для подсветки
-            let original_index = i;
-            
-            let style = if Some(original_index) == dialog.list_state.selected() {
+        // УВЕЛИЧИВАЕМ ТЕКСТ СПРАВКИ
+        // Текст справки
+        let help_text = vec![
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Основное управление:",
                 Style::default()
-                    .fg(theme::TEXT_PRIMARY)
-                    .add_modifier(Modifier::BOLD)
-            } else if entry.is_dir {
-                styles::folder()
-            } else {
-                styles::normal_file()
-            };
-            
-            let line_rect = Rect::new(files_area.x, files_area.y + y as u16, files_area.width, 1);
-            let name_paragraph = Paragraph::new(Line::from(Span::styled(&entry.name, style)))
-                .style(styles::surface());
-            frame.render_widget(name_paragraph, line_rect);
-            
-            y += 1;
-        }
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("F2", Style::default().fg(theme::SUCCESS)),
+                Span::raw(" - Воспроизведение"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("F3", Style::default().fg(theme::SUCCESS)),
+                Span::raw(" - Пауза"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("F4", Style::default().fg(theme::SUCCESS)),
+                Span::raw(" - Стоп"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("F5", Style::default().fg(theme::SUCCESS)),
+                Span::raw(" - Предыдущий трек"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("F6", Style::default().fg(theme::SUCCESS)),
+                Span::raw(" - Следующий трек"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("F9", Style::default().fg(theme::SUCCESS)),
+                Span::raw(" - Сохранить плейлист"),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Навигация:",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Tab", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Переключение между панелями"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("↑/↓", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Навигация по спискам"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("→", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Войти в папку / Добавить в плейлист"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("←", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Выйти из папки"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Enter", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Добавить в плейлист"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Delete", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Удалить из плейлиста"),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Громкость:",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("+", Style::default().fg(theme::SECONDARY)),
+                Span::raw(" - Увеличить громкость"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("-", Style::default().fg(theme::SECONDARY)),
+                Span::raw(" - Уменьшить громкость"),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Форматы:",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from("  FLAC, WAV, OGG, M4A, AAC, DSD (DSF, DFF)"),
+            Line::from(""),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Управление в справке:",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("↑/↓", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Прокрутка"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("PageUp/PageDown", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Быстрая прокрутка"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Home/End", Style::default().fg(theme::WARNING)),
+                Span::raw(" - В начало/конец"),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Esc", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Закрыть справку"),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Поддерживаемые форматы:",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from("  • FLAC - формат без потерь"),
+            Line::from("  • WAV - несжатый аудио"),
+            Line::from("  • OGG/Vorbis - открытый формат"),
+            Line::from("  • M4A/AAC - современный формат"),
+            Line::from("  • DSD (DSF, DFF) - Super Audio CD"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Особенности:",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from("  • Hi-Res аудио поддержка"),
+            Line::from("  • Плейлисты M3U"),
+            Line::from("  • Текстовый интерфейс (TUI)"),
+            Line::from("  • Написан на Rust"),
+            Line::from(""),
+            Line::from("Для качественного звука рекомендуется:"),
+            Line::from("  • Использовать FLAC или WAV"),
+            Line::from("  • Отключить системные эффекты"),
+            Line::from("  • Использовать качественные наушники/колонки"),
+            Line::from(""),
+            Line::from("Приятного прослушивания! 🎵"),
+            Line::from(""),
+        ];
 
-        // ПОДСВЕТКА ВЫБРАННОГО ЭЛЕМЕНТА (только если он видим)
-        if let Some(selected) = dialog.list_state.selected() {
-            if selected >= scroll_offset && (selected - scroll_offset) < files_area.height as usize {
-                let highlight_y = (selected - scroll_offset) as u16;
-                let highlight_rect = Rect::new(
-                    files_area.x,
-                    files_area.y + highlight_y,
-                    files_area.width,
-                    1,
-                );
-                let highlight = Paragraph::new("")
-                    .style(Style::default().bg(theme::SELECTED));
-                frame.render_widget(highlight, highlight_rect);
-            }
-        }
-        // ПУСТАЯ СТРОКА-РАЗДЕЛИТЕЛЬ
-        let separator_area = inner_chunks[3];
-        let separator = Paragraph::new("").style(styles::surface());
-        frame.render_widget(separator, separator_area);
-        
-        // Подсказки
-        let hints = Paragraph::new(Line::from(vec![
-            Span::styled("Enter: Save  ", Style::default().fg(theme::TEXT_SECONDARY)),
-            Span::styled(" Esc: Cancel  ", Style::default().fg(theme::TEXT_SECONDARY)),
-            Span::styled(" Ctrl+←/→: Navigate ", Style::default().fg(theme::TEXT_SECONDARY)),
-        ]));
-        frame.render_widget(hints, inner_chunks[4]);
+        let help_paragraph = Paragraph::new(help_text)
+            .style(styles::surface())
+            .alignment(ratatui::layout::Alignment::Left)
+            .scroll((app.help_scroll, 0)); // ← ДОБАВЛЯЕМ СКРОЛЛ
+
+        frame.render_widget(help_paragraph, inner_chunks[0]);
+
+        // Обновляем подсказку
+        let hint_text = if app.help_scroll > 0 {
+            format!(
+                " ↑/↓ - прокрутка | Esc - закрыть (позиция: {}) ",
+                app.help_scroll
+            )
+        } else {
+            " ↑/↓ - прокрутка | Esc - закрыть ".to_string()
+        };
+
+        let hint = Paragraph::new(Line::from(Span::styled(
+            hint_text,
+            Style::default().fg(theme::TEXT_SECONDARY),
+        )));
+        frame.render_widget(hint, inner_chunks[1]);
     }
-}
 }
