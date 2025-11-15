@@ -5,11 +5,10 @@ use std::time::Duration;
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
 
 pub struct AudioDecoder {
     format: Box<dyn FormatReader>,
@@ -51,17 +50,17 @@ impl AudioDecoder {
         })
     }
 
-    pub fn seek(&mut self, time: Duration) -> Result<(), Error> {
-        let seek_to = SeekTo::Time {
-            time: Time::from(time),
-            track_id: Some(self.track_id),
-        };
-        let seeked_to = self.format.seek(SeekMode::Accurate, seek_to)?;
-        self.current_frame = seeked_to.actual_ts;
-        Ok(())
-    }
+    // pub fn seek(&mut self, time: Duration) -> Result<(), Error> {
+    //     let seek_to = SeekTo::Time {
+    //         time: Time::from(time),
+    //         track_id: Some(self.track_id),
+    //     };
+    //     let seeked_to = self.format.seek(SeekMode::Accurate, seek_to)?;
+    //     self.current_frame = seeked_to.actual_ts;
+    //     Ok(())
+    // }
 
-    pub fn decode_next(&mut self) -> Result<Option<AudioBufferRef>, Error> {
+    pub fn decode_next(&mut self) -> Result<Option<AudioBufferRef<'_>>, Error> {
         let packet = self.format.next_packet()?;
 
         if packet.track_id() == self.track_id {
@@ -90,17 +89,17 @@ impl AudioDecoder {
         Some(Duration::from_secs_f64(time.seconds as f64 + time.frac))
     }
 
-    pub fn current_time(&self) -> Option<Duration> {
-        let track = self
-            .format
-            .tracks()
-            .iter()
-            .find(|t| t.id == self.track_id)?;
-        let time_base = track.codec_params.time_base?;
-
-        let time = time_base.calc_time(self.current_frame);
-        Some(Duration::from_secs_f64(time.seconds as f64 + time.frac))
-    }
+    //     pub fn current_time(&self) -> Option<Duration> {
+    //         let track = self
+    //             .format
+    //             .tracks()
+    //             .iter()
+    //             .find(|t| t.id == self.track_id)?;
+    //         let time_base = track.codec_params.time_base?;
+    //
+    //         let time = time_base.calc_time(self.current_frame);
+    //         Some(Duration::from_secs_f64(time.seconds as f64 + time.frac))
+    //     }
 }
 
 // Адаптер для преобразования Symphonia AudioBuffer в Rodio Source

@@ -1177,9 +1177,7 @@ impl SaveDialog {
     }
 } // <-- Закрывающая фигурная скобка для impl SaveDialog
 fn is_audio_file(path: &Path) -> bool {
-    let audio_extensions = [
-        "wav", "flac", "ogg", "m4a", "aac", "dsf", "dff", "m3u",
-    ];
+    let audio_extensions = ["wav", "flac", "ogg", "m4a", "aac", "dsf", "dff", "m3u"];
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| audio_extensions.contains(&ext.to_lowercase().as_str()))
@@ -1208,7 +1206,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     suppress_alsa_warnings();
     // Увеличиваем размер аудиобуфера для предотвращения underrun
-    env::set_var("RUST_AUDIO_BACKEND_BUFFER_SIZE", "8192");
+    env::set_var("RUST_AUDIO_BACKEND_BUFFER_SIZE", "16384");
     env::set_var("RUST_AUDIO_LATENCY", "1");
     let cli = Cli::parse();
 
@@ -1310,7 +1308,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     //         eprintln!("Ошибка перемотки вперед: {}", e);
                     //     }
                     // }
-                    KeyCode::Char('q') | KeyCode::Esc => break 'main,
+                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break 'main;
+                    }
                     KeyCode::Tab => app.switch_panel(),
                     KeyCode::F(9) => {
                         if app.save_dialog.is_none() {
@@ -1355,15 +1355,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Left => {
                         if let Err(e) = app.leave_directory() {
                             eprintln!("Ошибка: {}", e);
-                        }
-                    }
-
-                    // В match key.code { ... } добавь:
-                    KeyCode::Esc => {
-                        if app.show_help {
-                            app.show_help = false; // Закрыть справку по Esc
-                        } else {
-                            break 'main; // Выйти из приложения
                         }
                     }
 
@@ -2180,6 +2171,19 @@ fn ui(frame: &mut ratatui::Frame<CrosstermBackend<io::Stdout>>, app: &App) {
                 Span::raw("  "),
                 Span::styled("Esc", Style::default().fg(theme::WARNING)),
                 Span::raw(" - Закрыть справку"),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Закрытие приложения:",
+                Style::default()
+                    .fg(theme::PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Ctrl+Q", Style::default().fg(theme::WARNING)),
+                Span::raw(" - Выйти из приложения"),
             ]),
             Line::from(""),
             Line::from(vec![Span::styled(
