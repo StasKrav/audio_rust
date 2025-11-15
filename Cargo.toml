@@ -10,3 +10,12 @@ ratatui = "0.23"
 crossterm = "0.27"
 console = "0.15"
 libc = "0.2"  # ← перенесено сюда, убрал дублирование
+
+# НОВЫЕ ДЕПЕНДЕНСИИ ДЛЯ SYMPHONIA
+symphonia = "0.5"
+symphonia-bundle-flac = "0.5"
+symphonia-bundle-mp3 = "0.5"
+symphonia-codec-vorbis = "0.5"  # ВМЕСТО symphonia-bundle-ogg
+symphonia-format-wav = "0.5"
+symphonia-core = "0.5"
+symphonia-format-isomp4 = "0.5"  # для AAC/M4A
